@@ -273,7 +273,8 @@ class CoinProc:
             return
 
         won    = (cp > 0.5) if direction == "YES" else (cp < 0.5)
-        payout = amount * (1.0/cp) if (won and cp > 0) else 0.0
+        # Binary option payout is 1 USDC per share if won.
+        payout = (amount / pend.get("price", 0.49)) if won else 0.0
         pnl    = (payout - amount) if won else -amount
 
         _strat.on_result(coin, won)
