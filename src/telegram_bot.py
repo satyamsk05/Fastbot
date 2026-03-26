@@ -263,7 +263,7 @@ class TelegramBot:
             fav = "UP" if up > dn else "DN"
             arrow = "↑" if up > dn else "↓"
             
-            lines.append(f"{coin} → UP:{up:.3f} | DN:{dn:.3f} | {arrow} {fav}")
+            lines.append(f"{coin} → UP {up:.3f}  || DN {dn:.3f} | {arrow} {fav}")
             lines.append("---------------")
             
         lines.append(f"⏰ {timer_str}")
