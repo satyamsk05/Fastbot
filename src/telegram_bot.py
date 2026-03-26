@@ -260,12 +260,10 @@ class TelegramBot:
             secs = sec % 60
             timer_str = f"{mins:02d}:{secs:02d}"
             
-            fav = "UP" if up > dn else "DN"
-            arrow = "↑" if up > dn else "↓"
-            
-            lines.append(f"*{coin}* → UP {up:.3f}  || DN {dn:.3f} | {arrow} {fav}")
-            lines.append("---------------")
-            
+            lines.append(f"🌟 *{coin}*")
+            lines.append(f"  🟢 YES: ${up:.2f}  |  🔴 NO: ${dn:.2f}")
+            lines.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+
         lines.append(f"⏰ {timer_str}")
         return _box("📉 LIVE PRICES", lines)
 
