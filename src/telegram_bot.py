@@ -206,6 +206,9 @@ class TelegramBot:
     # ── hide keyboard (obsolete, but keeping for safety) ───────────
     async def _cmd_hide(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⌨️ Re-sending menu...", reply_markup=self._get_kb())
+
+    # ── /history ───────────────────────────────────────────────────────────────
+    async def _cmd_history(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show recent trade results."""
         bets = hm.get_bet_history(n=10)
         if not bets:
