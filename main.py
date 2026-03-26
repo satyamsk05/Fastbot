@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""
+╔══════════════════════════════════════════════════════════╗
+║   Polymarket Streak-Reversal Martingale Bot  v2.0        ║
+╠══════════════════════════════════════════════════════════╣
+║  Coins    : BTC · ETH · SOL · XRP (configurable)        ║
+║  Interval : 15-minute markets                            ║
+║  Signal   : 3+ same-dir closes → reverse bet            ║
+║  Ladder   : $3 → $6 → $13 → $28 → $60 USDC             ║
+╠══════════════════════════════════════════════════════════╣
+║  Data     : 4coinsbot WebSocket (live orderbook)         ║
+║  History  : bet_history / candle_history / positions     ║
+║  Telegram : /history /live /stop /balance /position      ║
+║             /daily_pnl  +  manual $N bets                ║
+╚══════════════════════════════════════════════════════════╝
+"""
+
+import os, sys, json, time, random, signal, logging, threading, requests
+from typing import Dict, List, Optional
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SRC_DIR = Path(__file__).parent
+sys.path.insert(0, str(SRC_DIR))
+
+from strategy      import StreakReversalStrategy, Martingale, BET_SEQUENCE
+from data_feed     import DataFeed
+from dashboard     import Dashboard
+from telegram_bot  import get_bot, get_notifier
+import history_manager as hm
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENV CONFIG
+# ═══════════════════════════════════════════════════════════════════════════════
+DRY_RUN        = os.getenv("DRY_RUN", "true").lower() in ("1","true","yes")
+PRIVATE_KEY    = os.getenv("PRIVATE_KEY", "")
+RPC_URL        = os.getenv("RPC_URL", "https://polygon-rpc.com")
+CLOB_HOST      = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
+API_KEY        = os.getenv("POLYMARKET_API_KEY", "")
+API_SECRET     = os.getenv("POLYMARKET_API_SECRET", "")
+API_PASSPHRASE = os.getenv("POLYMARKET_API_PASSPHRASE", "")
+FUNDER_ADDRESS = os.getenv("FUNDER_ADDRESS", "")
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "")
+
+COINS_ENABLED = {
+    "BTC": os.getenv("ENABLE_BTC", "true").lower()  in ("1","true","yes"),
+    "ETH": os.getenv("ENABLE_ETH", "true").lower()  in ("1","true","yes"),
+    "SOL": os.getenv("ENABLE_SOL", "true").lower()  in ("1","true","yes"),
+    "XRP": os.getenv("ENABLE_XRP", "false").lower() in ("1","true","yes"),
+}
+ACTIVE_COINS = [c for c, v in COINS_ENABLED.items() if v]
+
+INTERVAL_SEC      = 15 * 60
+CANDLE_SETTLE     = 5          # wait N sec after boundary before fetching price
+DASHBOARD_REFRESH = 1.0
+VBAL_START        = 500.0
+BET_MIN_FUNDS     = 3.0
+
+# ── dirs + logging ────────────────────────────────────────────────────────────
+for d in ("logs","data","history"):
+    os.makedirs(d, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler("logs/bot.log")],
+)
+for lib in ("urllib3","requests","httpx","telegram","apscheduler"):
+    logging.getLogger(lib).setLevel(logging.WARNING)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL STATE
+# ═══════════════════════════════════════════════════════════════════════════════
+_stop    = threading.Event()
+_paused  = threading.Event()    # set = bot is paused
+
+_strat   = StreakReversalStrategy()
+_mg      = _strat.martingale
+
+_pending: Dict[str, Optional[Dict]] = {c: None for c in ACTIVE_COINS}
+_plock   = threading.Lock()
+
+_tradelog: List[Dict] = []
+_tlock    = threading.Lock()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WALLET
+# ═══════════════════════════════════════════════════════════════════════════════
+_VBAL = "data/virtual_balance.json"
+
+def _vbal_read() -> float:
+    try:
+        if os.path.exists(_VBAL):
+            with open(_VBAL) as f:
+                return float(json.load(f).get("balance", VBAL_START))
+    except Exception:
+        pass
+    return VBAL_START
+
+def _vbal_write(b: float):
+    with open(_VBAL,"w") as f:
+        json.dump({"balance": round(b,2)}, f)
+
+def get_wallet_balance() -> float:
+    if DRY_RUN:
+        return _vbal_read()
+    try:
+        from web3 import Web3
+        from web3.middleware import ExtraDataToPOAMiddleware
+        w3 = Web3(Web3.HTTPProvider(RPC_URL))
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        if not w3.is_connected():
+            return 0.0
+        wallet = FUNDER_ADDRESS or WALLET_ADDRESS
+        if not wallet:
+            return 0.0
+        addr = w3.to_checksum_address(wallet)
+        usdc = w3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+        abi  = [{"constant":True,"inputs":[{"name":"_owner","type":"address"}],
+                 "name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],
+                 "type":"function"}]
+        raw = w3.eth.contract(address=usdc,abi=abi).functions.balanceOf(addr).call()
+        return round(raw/1_000_000, 2)
+    except Exception as e:
+        logging.error(f"[BAL] {e}")
+        return 0.0
+
+def get_in_bets() -> float:
+    return sum(p.get("amount",0) for p in hm.get_open_positions().values())
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARKET DATA
+# ═══════════════════════════════════════════════════════════════════════════════
+def _tokens(coin: str, ts: int) -> Optional[Dict]:
+    slug = f"{coin.lower()}-updown-15m-{ts}"
+    url  = f"https://gamma-api.polymarket.com/events?slug={slug}"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        events = r.json()
+        if not events:
+            return None
+        mkt  = events[0]["markets"][0]
+        tids = mkt.get("clobTokenIds",[])
+        outs = mkt.get("outcomes",[])
+        cond = mkt.get("conditionId","")
+        if isinstance(tids,str): tids = json.loads(tids)
+        if isinstance(outs,str): outs = json.loads(outs)
+        ui = outs.index("Up")   if "Up"   in outs else 0
+        di = outs.index("Down") if "Down" in outs else 1
+        return {"yes_token":tids[ui],"no_token":tids[di],
+                "condition_id":cond,"slug":slug}
+    except Exception as e:
+        logging.warning(f"[{coin}] tokens err: {e}")
+        return None
+
+def _price(token_id: str) -> Optional[float]:
+    try:
+        r = requests.get(f"https://clob.polymarket.com/last-trade-price?token_id={token_id}", timeout=8)
+        if r.status_code == 200:
+            return float(r.json().get("price",0))
+    except Exception:
+        pass
+    return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORDER PLACEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+def _place(token_id: str, amount: float, coin: str,
+           step: int, direction: str):
+    """Returns (success, price, order_type_label)"""
+    price  = 0.99 if step == 0 else 0.49
+    ot_lbl = "FOK" if step == 0 else "GTC"
+
+    if DRY_RUN:
+        logging.info(f"[{coin}] DRY {direction} ${amount} @ {price} ({ot_lbl})")
+        return True, price, ot_lbl
+
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+        from py_clob_client.constants import POLYGON
+
+        creds  = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
+        pk     = PRIVATE_KEY.lstrip("0x") if PRIVATE_KEY else ""
+        client = ClobClient(CLOB_HOST, chain_id=POLYGON, key=pk, creds=creds,
+                            signature_type=2 if FUNDER_ADDRESS else 1,
+                            funder=FUNDER_ADDRESS or None)
+        size   = round(amount / price, 2)
+        if size < 0.1:
+            return False, price, ot_lbl
+        signed = client.create_order(OrderArgs(token_id=token_id, price=price, size=size, side="BUY"))
+        resp   = client.post_order(signed, OrderType.FOK if step==0 else OrderType.GTC)
+        return bool(resp and resp.get("status") not in ("unmatched",None)), price, ot_lbl
+    except Exception as e:
+        logging.error(f"[{coin}] place: {e}")
+        return False, price, ot_lbl
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PER-COIN PROCESSOR
+# ═══════════════════════════════════════════════════════════════════════════════
+class CoinProc:
+    def __init__(self, coin: str):
+        self.coin = coin.upper()
+        self.processed_ts = 0
+        self.warmup = 0
+
+    def tick(self, now: int) -> Optional[Dict]:
+        """Run every second. Returns signal dict or None."""
+        boundary   = (now // INTERVAL_SEC) * INTERVAL_SEC
+        since      = now - boundary
+        closed_ts  = boundary - INTERVAL_SEC
+        coin       = self.coin
+
+        if boundary <= self.processed_ts or since < CANDLE_SETTLE:
+            return None
+
+        self.processed_ts = boundary
+        self.warmup += 1
+        logging.info(f"[{coin}] Boundary {boundary}")
+
+        # 1. Resolve pending
+        with _plock:
+            pend = _pending.get(coin)
+        if pend and pend.get("ts") == closed_ts:
+            self._resolve(pend, closed_ts)
+
+        # 2. Warmup
+        if self.warmup < 3:
+            logging.info(f"[{coin}] Warmup {self.warmup}/3")
+            return None
+
+        # 3. Fetch close
+        tkns = _tokens(coin, closed_ts)
+        if not tkns:
+            return None
+        cp = _price(tkns["yes_token"])
+        if cp is None:
+            return None
+
+        logging.info(f"[{coin}] Close: {cp:.4f}")
+        hm.push_candle(coin, closed_ts, cp)
+
+        # 4. Detect signal
+        sig = _strat.on_candle_close(coin, closed_ts, cp)
+        if sig is None:
+            return None
+
+        # 5. Fetch active market tokens
+        active_tkns = _tokens(coin, boundary)
+        if not active_tkns:
+            logging.warning(f"[{coin}] No active market")
+            return None
+
+        sig["active_ts"]    = boundary
+        sig["yes_token"]    = active_tkns["yes_token"]
+        sig["no_token"]     = active_tkns["no_token"]
+        sig["condition_id"] = active_tkns["condition_id"]
+        return sig
+
+    def _resolve(self, pend: Dict, closed_ts: int):
+        coin      = self.coin
+        direction = pend["direction"]
+        amount    = pend["amount"]
+
+        tkns = _tokens(coin, closed_ts)
+        cp   = _price(tkns["yes_token"]) if tkns else None
+
+        if cp is None:
+            logging.warning(f"[{coin}] Resolve failed — no price")
+            return
+
+        won    = (cp > 0.5) if direction == "YES" else (cp < 0.5)
+        payout = amount * (1.0/cp) if (won and cp > 0) else 0.0
+        pnl    = (payout - amount) if won else -amount
+
+        _strat.on_result(coin, won)
+        hm.log_bet_result(coin, closed_ts, won, pnl)
+        hm.close_position(coin)
+        hm.record_pnl(pnl)
+
+        if DRY_RUN and won:
+            _vbal_write(_vbal_read() + payout)
+
+        get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
+
+        with _tlock:
+            _tradelog.append({"coin":coin,"direction":direction,
+                               "amount":amount,"won":won,"pnl":round(pnl,2)})
+            if len(_tradelog) > 50:
+                _tradelog.pop(0)
+
+        with _plock:
+            _pending[coin] = None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIGNAL PICKER  (random, recovery priority)
+# ═══════════════════════════════════════════════════════════════════════════════
+def _pick_and_place(signals: List[Dict], notifier):
+    if not signals:
+        return
+
+    # Recovery coins (step>0) have priority
+    recovery = [s for s in signals if s["step"] > 0]
+    chosen   = random.choice(recovery) if recovery else random.choice(signals)
+
+    coin      = chosen["coin"]
+    direction = chosen["direction"]
+    amount    = chosen["amount"]
+    step      = chosen["step"]
+    token_id  = chosen["yes_token"] if direction == "YES" else chosen["no_token"]
+
+    # Balance check
+    bal = get_wallet_balance()
+    if bal < max(amount, BET_MIN_FUNDS):
+        notifier.notify_insufficient_funds(coin, bal, amount)
+        return
+
+    # Notify signal
+    notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
+
+    # Already has pending?
+    with _plock:
+        if _pending.get(coin) is not None:
+            logging.info(f"[{coin}] Skip — already pending")
+            return
+
+    ok, price, ot = _place(token_id, amount, coin, step, direction)
+
+    if ok:
+        if DRY_RUN:
+            _vbal_write(_vbal_read() - amount)
+        hm.log_bet_placed(coin, direction, amount, price, ot, step,
+                          chosen["active_ts"], token_id)
+        hm.open_position(coin, direction, amount, price, chosen["active_ts"], token_id)
+        with _plock:
+            _pending[coin] = {
+                "direction": direction, "amount": amount, "step": step,
+                "ts": chosen["active_ts"],
+                "yes_token": chosen["yes_token"],
+                "no_token":  chosen["no_token"],
+                "token_id":  token_id, "price": price,
+            }
+        notifier.notify_trade_placed(coin, direction, amount, price, ot, step)
+    else:
+        notifier.notify_error(f"{coin} order", "Placement failed")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+def main():
+    # PID guard
+    pid_file = "data/bot.pid"
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                old = int(f.read().strip())
+            os.kill(old, 0)
+            print(f"[ERROR] Bot already running (PID {old}). Stop first.")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass
+    with open(pid_file,"w") as f:
+        f.write(str(os.getpid()))
+
+    print(f"""
+╔══════════════════════════════════════════════════════════╗
+║   Polymarket Streak-Reversal Martingale Bot  v2.0        ║
+║   Mode : {'DRY RUN' if DRY_RUN else 'LIVE TRADING':<49}║
+║   Coins: {', '.join(ACTIVE_COINS):<49}║
+╚══════════════════════════════════════════════════════════╝""")
+
+    if not ACTIVE_COINS:
+        print("[ERROR] No coins enabled")
+        sys.exit(1)
+
+    # Reset session state
+    hm.reset_on_startup()
+    _mg.reset_all()
+    if DRY_RUN and not os.path.exists(_VBAL):
+        _vbal_write(VBAL_START)
+
+    # Build components
+    tg_bot   = get_bot()
+    notifier = get_notifier()
+    dash     = Dashboard(width=160, coins=ACTIVE_COINS)
+    tg_bot.active_coins = ACTIVE_COINS
+
+    # Start data feed
+    data_feed = DataFeed(config={
+        "data_sources": {
+            "polymarket": {
+                "gamma_api": "https://gamma-api.polymarket.com",
+                "ws_url":    "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+            }
+        }
+    })
+    data_feed.start()
+    print(f"[SYSTEM] Feeds started: {', '.join(ACTIVE_COINS)}")
+
+    # Wire telegram callbacks
+    tg_bot.get_balance = get_wallet_balance
+    tg_bot.get_in_bets = get_in_bets
+
+    def _live():
+        out = {}
+        for c in ACTIVE_COINS:
+            st = data_feed.get_state(c.lower())
+            if st:
+                out[c] = {"up_ask": st.get("up_ask",0),
+                           "down_ask": st.get("down_ask",0),
+                           "seconds_till_end": st.get("seconds_till_end",900)}
+        return out
+    tg_bot.get_live_state = _live
+
+    def _pause(paused: bool):
+        if paused: _paused.set()
+        else: _paused.clear()
+    tg_bot.on_stop = _pause
+
+    def _manual(amount: float) -> str:
+        if _paused.is_set():
+            return "⏸ Bot paused. /stop to resume."
+        best_coin, best_conf = None, 0.0
+        for c in ACTIVE_COINS:
+            st = data_feed.get_state(c.lower())
+            if st:
+                conf = abs(st.get("up_ask",0) - st.get("down_ask",0))
+                if conf > best_conf:
+                    best_conf, best_coin = conf, c
+        if not best_coin:
+            return "⚠️ No market data yet."
+        with _plock:
+            if _pending.get(best_coin):
+                return f"⚠️ {best_coin} already has an open bet."
+        st = data_feed.get_state(best_coin.lower())
+        direction = "YES" if st.get("up_ask",0) > st.get("down_ask",0) else "NO"
+        active_ts = (int(time.time())//INTERVAL_SEC)*INTERVAL_SEC
+        tkns = _tokens(best_coin, active_ts)
+        if not tkns:
+            return f"⚠️ Cannot fetch {best_coin} market."
+        token_id = tkns["yes_token"] if direction=="YES" else tkns["no_token"]
+        step = _mg.get_step(best_coin)
+        ok, price, ot = _place(token_id, amount, best_coin, step, direction)
+        if ok:
+            if DRY_RUN: _vbal_write(_vbal_read()-amount)
+            hm.log_bet_placed(best_coin,direction,amount,price,ot,step,active_ts,token_id)
+            hm.open_position(best_coin,direction,amount,price,active_ts,token_id)
+            with _plock:
+                _pending[best_coin] = {
+                    "direction":direction,"amount":amount,"step":step,
+                    "ts":active_ts,"yes_token":tkns["yes_token"],
+                    "no_token":tkns["no_token"],"token_id":token_id,"price":price,
+                }
+            arrow = "⬆ YES" if direction=="YES" else "⬇ NO"
+            return f"✅ *Manual bet*\n{best_coin}  {arrow}  ${amount:.0f}  @ {price:.3f} ({ot})"
+        return f"❌ Order failed for {best_coin}."
+    tg_bot.on_manual_bet = _manual
+
+    # Signal handler
+    def _shutdown(sig, frame):
+        print("\n[SYSTEM] Stopping...")
+        _stop.set()
+        data_feed.stop()
+        try: os.remove(pid_file)
+        except: pass
+        sys.exit(0)
+    signal.signal(signal.SIGINT,  _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    # Telegram startup
+    notifier.notify_startup(ACTIVE_COINS, DRY_RUN)
+
+    # Dashboard thread
+    def _dash():
+        while not _stop.is_set():
+            try:
+                ms = {}
+                for c in ACTIVE_COINS:
+                    st = data_feed.get_state(c.lower())
+                    if st:
+                        ms[c] = {"up_ask":st.get("up_ask",0),
+                                 "down_ask":st.get("down_ask",0),
+                                 "seconds_till_end":st.get("seconds_till_end",900),
+                                 "market_slug":st.get("market_slug","")}
+                with _plock:  ps = {c:_pending.get(c) for c in ACTIVE_COINS}
+                with _tlock:  tl = list(_tradelog)
+                dash.render(ms, {c:_mg.get_step(c) for c in ACTIVE_COINS},
+                            ps, tl, get_wallet_balance(), DRY_RUN)
+            except Exception as e:
+                logging.error(f"[DASH] {e}")
+            time.sleep(DASHBOARD_REFRESH)
+
+    threading.Thread(target=_dash, daemon=True, name="dashboard").start()
+
+    # Coin processors
+    procs = {c: CoinProc(c) for c in ACTIVE_COINS}
+
+    # Main loop
+    print("[SYSTEM] Running. Ctrl+C to stop.")
+    while not _stop.is_set():
+        now = int(time.time())
+        if _paused.is_set():
+            time.sleep(1)
+            continue
+
+        sigs = []
+        for c, p in procs.items():
+            try:
+                s = p.tick(now)
+                if s: sigs.append(s)
+            except Exception as e:
+                logging.error(f"[{c}] {e}")
+                dash.log_error(f"{c}: {e}")
+
+        if sigs:
+            try:
+                _pick_and_place(sigs, notifier)
+            except Exception as e:
+                logging.error(f"[PICK] {e}")
+
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        try: os.remove("data/bot.pid")
+        except: pass
