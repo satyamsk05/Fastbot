@@ -24,7 +24,7 @@ import time
 from typing import Optional, Callable, Dict
 
 try:
-    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
     from telegram.ext import (Application, CommandHandler, MessageHandler,
                                CallbackQueryHandler, ContextTypes, filters)
     TELEGRAM_OK = True
@@ -237,7 +237,6 @@ class TelegramBot:
             await update.message.reply_text("Live data not available yet.")
             return
 
-        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_live")]])
         await update.message.reply_text(content, parse_mode="Markdown", reply_markup=inline_kb)
 
@@ -362,23 +361,114 @@ class TelegramBot:
 
     # ── manual bet menu (Step 1: Pick Coin) ─────────────────────────────────
     async def _cmd_manual_bet(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Show coin selection for manual bet."""
+        """Entry point for Manual Bet flow."""
         if self.is_paused:
             await update.message.reply_text("⏸ Bot is paused. Resume with /stop first.")
             return
+        
+        # Initialize default amount if not set
+        if "manual_amount" not in ctx.user_data:
+            ctx.user_data["manual_amount"] = 1.0
+            
+        await self._show_manual_trade_menu(update, ctx)
 
-        coin_buttons = [
-            InlineKeyboardButton(f"₿ {c}", callback_data=f"mb_coin_{c}")
-            for c in self.active_coins
-        ]
-        # 2 coins per row
-        rows = [coin_buttons[i:i+2] for i in range(0, len(coin_buttons), 2)]
-        inline_kb = InlineKeyboardMarkup(rows)
-        await update.message.reply_text(
-            "🎯 *Manual Bet — Step 1: Pick Coin*",
-            parse_mode="Markdown",
-            reply_markup=inline_kb,
+    def _manual_header(self, coin: str = "BTC") -> str:
+        """User-requested header design for manual trade."""
+        now_ts = int(time.time())
+        t_str = time.strftime("%H:%M:%S")
+        
+        # Calculate 15m window
+        window_start = (now_ts // 900) * 900
+        window_end = window_start + 900
+        s_str = time.strftime("%-I:%M%p", time.localtime(window_start))
+        e_str = time.strftime("%-I:%M%p", time.localtime(window_end))
+        d_str = time.strftime("%B %d", time.localtime(window_start))
+        
+        return (
+            f"🎯 *MANUAL TRADE*\n"
+            f"──────────────────────────\n"
+            f"⏰ *Time:* {t_str}\n"
+            f"📍 *Market:* {coin} Up/Down\n"
+            f"📅 - {d_str}, {s_str}-{e_str} ET\n"
+            f"──────────────────────────\n"
         )
+
+    def _get_betting_inline(self, sel_coin: str = None, sel_amount: float = None) -> InlineKeyboardMarkup:
+        """Sequential multi-step inline row builder with ✅ highlight on the LEFT."""
+        rows = []
+        
+        # Step 1: Coin Row
+        coins = ["BTC", "ETH", "SOL", "XRP"]
+        rows.append([
+            InlineKeyboardButton(f"✅ {c}" if c == sel_coin else c, callback_data=f"mcoin_{c}") 
+            for c in coins
+        ])
+        
+        # Step 2: Amount Row (only if coin selected)
+        if sel_coin:
+            amounts = [1, 2, 3, 5]
+            rows.append([
+                InlineKeyboardButton(f"✅ ${a}" if a == sel_amount else f"${a}", callback_data=f"mamt_{a}")
+                for a in amounts
+            ])
+            
+        # Step 3: Direction Row (only if coin AND amount selected)
+        if sel_coin and sel_amount:
+            rows.append([
+                InlineKeyboardButton("⬆️ UP (YES)", callback_data=f"mdir_{sel_coin}_YES"),
+                InlineKeyboardButton("⬇️ DOWN (NO)", callback_data=f"mdir_{sel_coin}_NO")
+            ])
+            
+        # Navigation / Back
+        rows.append([InlineKeyboardButton("🔙 Back to Coins", callback_data="mback_coins")])
+        
+        return InlineKeyboardMarkup(rows)
+
+    def _get_manual_text(self, step: int, coin: str = None, amount: float = None) -> str:
+        """Helper to build the cumulative beauty text."""
+        header = self._manual_header(coin or "BTC")
+        lines = [header]
+        
+        if step >= 1:
+            lines.append("Step 1: 🪙 *Coin Select*")
+            if coin:
+                lines.append(f"               *{coin} ✅*")
+                lines.append("")
+        
+        if step >= 2:
+            lines.append("Step 2: 💰 *Amount*")
+            if amount:
+                lines.append(f"               *${amount:.0f} ✅*")
+                lines.append("")
+        
+        if step == 3:
+            lines.append("Step 3: 📈 *Direction*")
+            
+        return "\n".join(lines)
+
+    async def _show_manual_trade_menu(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        text = self._get_manual_text(step=1)
+        inline_kb = self._get_betting_inline()
+        
+        # ✅ FIX: Keep main menu buttons instead of hiding them
+        reply_kb = self._get_kb()
+        
+        if update.callback_query:
+            try:
+                await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=inline_kb)
+            except:
+                pass
+        else:
+            # Show the main menu at bottom to ensure no "duplicate" $1, $2 buttons
+            await update.message.reply_text("🎯 *Manual Trade Mode*", 
+                                           parse_mode="Markdown",
+                                           reply_markup=reply_kb)
+            
+            query_msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=inline_kb)
+            ctx.user_data["menu_msg_id"] = query_msg.message_id
+            # Reset selection state
+            ctx.user_data["manual_coin"] = None
+            ctx.user_data["manual_amount"] = None
 
     # ── inline callback handler (multi-step) ──────────────────────────────
     async def _on_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -391,7 +481,6 @@ class TelegramBot:
         if data == "refresh_live":
             content = self._get_live_content()
             if content:
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
                 inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_live")]])
                 try:
                     await query.edit_message_text(content, parse_mode="Markdown", reply_markup=inline_kb)
@@ -399,72 +488,49 @@ class TelegramBot:
                     pass # ignore "message is not modified"
             return
 
-        # ── Step 2: User picked a coin → show UP / DOWN ──────────
-        if data.startswith("mb_coin_"):
-            coin = data.replace("mb_coin_", "")
-            inline_kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("⬆ UP  (YES)", callback_data=f"mb_dir_{coin}_YES"),
-                    InlineKeyboardButton("⬇ DOWN (NO)", callback_data=f"mb_dir_{coin}_NO"),
-                ],
-            ])
-            await query.edit_message_text(
-                f"🎯 *Manual Bet — {coin}*\n\n*Step 2: Pick Direction*",
-                parse_mode="Markdown",
-                reply_markup=inline_kb,
-            )
+        # ── Step 1: Coin Selection ──────────────
+        if data.startswith("mcoin_"):
+            coin = data.replace("mcoin_", "")
+            ctx.user_data["manual_coin"] = coin
+            text = self._get_manual_text(step=2, coin=coin)
+            inline_kb = self._get_betting_inline(sel_coin=coin)
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=inline_kb)
 
-        # ── Step 3: User picked direction → show amounts ─────────
-        elif data.startswith("mb_dir_"):
-            parts = data.replace("mb_dir_", "").split("_")
+        # ── Step 2: Amount Selection ────────────
+        elif data.startswith("mamt_"):
+            amount = float(data.replace("mamt_", ""))
+            ctx.user_data["manual_amount"] = amount
+            coin = ctx.user_data.get("manual_coin", "BTC")
+            text = self._get_manual_text(step=3, coin=coin, amount=amount)
+            inline_kb = self._get_betting_inline(sel_coin=coin, sel_amount=amount)
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=inline_kb)
+
+        # ── Step 3: Direction Selection → Place Trade ──
+        elif data.startswith("mdir_"):
+            parts = data.replace("mdir_", "").split("_")
             coin, direction = parts[0], parts[1]
-            arrow = "⬆ UP" if direction == "YES" else "⬇ DOWN"
-            inline_kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("$3",  callback_data=f"mb_go_{coin}_{direction}_3"),
-                    InlineKeyboardButton("$6",  callback_data=f"mb_go_{coin}_{direction}_6"),
-                    InlineKeyboardButton("$13", callback_data=f"mb_go_{coin}_{direction}_13"),
-                ],
-                [
-                    InlineKeyboardButton("$28", callback_data=f"mb_go_{coin}_{direction}_28"),
-                    InlineKeyboardButton("$60", callback_data=f"mb_go_{coin}_{direction}_60"),
-                ],
-                [
-                    InlineKeyboardButton("✏️ Custom Amount", callback_data=f"mb_custom_{coin}_{direction}"),
-                ],
-            ])
-            await query.edit_message_text(
-                f"🎯 *Manual Bet — {coin} {arrow}*\n\n*Step 3: Pick Amount*",
-                parse_mode="Markdown",
-                reply_markup=inline_kb,
-            )
-
-        # ── Final: User picked amount → place bet ────────────────
-        elif data.startswith("mb_go_"):
-            parts = data.replace("mb_go_", "").split("_")
-            coin, direction, amt_str = parts[0], parts[1], parts[2]
-            amount = float(amt_str)
-            arrow = "⬆ UP" if direction == "YES" else "⬇ DOWN"
-
+            amount = ctx.user_data.get("manual_amount", 1.0)
+            
             if self.on_manual_bet:
                 result = self.on_manual_bet(coin, direction, amount)
-                await query.edit_message_text(result, parse_mode="Markdown")
-            else:
-                await query.edit_message_text(
-                    f"⚠️ Bot not ready — manual bet ${amount:.0f} {coin} {arrow} could not be placed.",
+                # Final display
+                header = self._manual_header(coin)
+                text = (
+                    f"{header}\n"
+                    f"Step 1: 🪙 *Coin Select* → {coin} ✅\n"
+                    f"Step 2: 💰 *Amount*      → ${amount:.0f} ✅\n"
+                    f"Step 3: 📈 *Direction*   → {'⬆️ UP' if direction=='YES' else '⬇️ DOWN'} ✅\n\n"
+                    f"🚀 *Result:* {result}"
                 )
+                await query.edit_message_text(text, parse_mode="Markdown")
+                # ✅ Restore bottom menu after trade is placed
+                await self._app.bot.send_message(chat_id=CHAT_ID, text="🔄 *Menu Restored*", 
+                                                 parse_mode="Markdown", reply_markup=self._get_kb())
+            else:
+                await query.edit_message_text("⚠️ Bot not ready for manual trade.")
 
-        # ── Custom amount: ask user to type ──────────────────────
-        elif data.startswith("mb_custom_"):
-            parts = data.replace("mb_custom_", "").split("_")
-            coin, direction = parts[0], parts[1]
-            arrow = "⬆ UP" if direction == "YES" else "⬇ DOWN"
-            # Store state for next text message
-            self._custom_bet_pending = {"coin": coin, "direction": direction}
-            await query.edit_message_text(
-                f"🎯 *{coin} {arrow}*\n\n✏️ Type your bet amount (e.g. `5` or `25`):",
-                parse_mode="Markdown",
-            )
+        elif data == "mback_coins":
+            await self._show_manual_trade_menu(update, ctx)
 
     # ── manual bet ($3, $6, etc.) + button handler ──────────────────────────
     async def _on_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -480,11 +546,21 @@ class TelegramBot:
             "⏸ Stop/Resume": self._cmd_stop,
             "📉 Trend":      self._cmd_trend,
             "🎯 Manual Bet": self._cmd_manual_bet,
+            "🔄 Refresh":    self._cmd_start,
             "⌨️ Hide Menu":   self._cmd_hide,
         }
         if text in button_map:
             await button_map[text](update, ctx)
             return
+
+        # ── Manual Bet Sub-Menu Handlers ─────────────────────────
+        if text == "🔙 Back":
+            # Return to main 3x3 menu
+            await update.message.reply_text("🔄 Returning to menu...", reply_markup=self._get_kb())
+            return await self._cmd_start(update, ctx)
+
+        # ❌ REMOVED: Duplicate $1, $2, $3, $5 logic from _on_message 
+        # (Users should use the Inline buttons for clean multi-step flow)
 
         # ── Custom amount pending (user typed a number) ──────────
         if hasattr(self, '_custom_bet_pending') and self._custom_bet_pending:
@@ -510,7 +586,7 @@ class TelegramBot:
 
         # ── Direct $amount typing → open manual bet flow ─────────
         if text.startswith("$"):
-            # Redirect to manual bet menu instead of auto-betting
+            # Redirect to manual bet menu
             await self._cmd_manual_bet(update, ctx)
             return
 

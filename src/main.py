@@ -202,13 +202,16 @@ def _price(token_id: str) -> Optional[float]:
 # ORDER PLACEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 def _place(token_id: str, amount: float, coin: str,
-           step: int, direction: str):
+           step: int, direction: str, price: Optional[float] = None):
     """Returns (success, price, order_type_label)"""
-    price  = 0.99 if step == 0 else 0.49
+    # ── FIXED: Use passed price or fallback only if still None ──
+    if price is None:
+        price = 0.99 if step == 0 else 0.49
+    
     ot_lbl = "FOK" if step == 0 else "GTC"
 
     if DRY_RUN:
-        logging.info(f"[{coin}] DRY {direction} ${amount} @ {price} ({ot_lbl})")
+        logging.info(f"[{coin}] DRY {direction} ${amount} @ {price:.3f} ({ot_lbl})")
         return True, price, ot_lbl
 
     try:
@@ -336,7 +339,7 @@ class CoinProc:
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL PICKER  (random, recovery priority)
 # ═══════════════════════════════════════════════════════════════════════════════
-def _pick_and_place(signals: List[Dict], notifier):
+def _pick_and_place(signals: List[Dict], notifier, data_feed):
     if not signals:
         return
 
@@ -365,7 +368,24 @@ def _pick_and_place(signals: List[Dict], notifier):
             logging.info(f"[{coin}] Skip — already pending")
             return
 
-    ok, price, ot = _place(token_id, amount, coin, step, direction)
+    # ── FIXED: Fetch live market price from feed ──
+    try:
+        st = data_feed.get_state(coin.lower())
+        if st:
+            # We want current ask price for the token we are buying
+            price = st["up_ask"] if direction == "YES" else st["down_ask"]
+            if not price or price <= 0:
+                price = 0.50 # fallback
+        else:
+            price = 0.50 # fallback
+    except Exception:
+        price = 0.50 # fallback
+
+    # ── FIXED: Apply 0.49-0.54 bracket for L2-L5 (Step > 0) ──
+    if step > 0:
+        price = max(0.49, min(price, 0.54))
+
+    ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
     if ok:
         if DRY_RUN:
@@ -482,9 +502,23 @@ def main():
         if not tkns:
             return f"⚠️ Cannot fetch {coin} market."
 
+        # ── FIXED: Fetch live price for manual bet ──
+        price = 0.50 # fallback
+        try:
+            st = data_feed.get_state(coin.lower())
+            if st:
+                price = st["up_ask"] if direction == "YES" else st["down_ask"]
+                if not price or price <= 0: price = 0.50
+        except Exception: pass
+
         token_id = tkns["yes_token"] if direction == "YES" else tkns["no_token"]
         step = _mg.get_step(coin)
-        ok, price, ot = _place(token_id, amount, coin, step, direction)
+
+        # ── FIXED: Apply 0.49-0.54 bracket for L2-L5 (Step > 0) ──
+        if step > 0:
+            price = max(0.49, min(price, 0.54))
+
+        ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
         if ok:
             if DRY_RUN:
@@ -565,7 +599,7 @@ def main():
 
             if sigs:
                 try:
-                    _pick_and_place(sigs, notifier)
+                    _pick_and_place(sigs, notifier, data_feed)
                 except Exception as e:
                     logging.error(f"[PICK] {e}")
 
