@@ -72,8 +72,9 @@ class TelegramBot:
         self.on_stop:        Optional[Callable] = None    # () → None   (pause trading)
         self.on_manual_bet:  Optional[Callable] = None   # (amount) → str  (result message)
         self.is_paused:      bool = False
-        self.active_coins:   list = ["BTC", "ETH", "SOL"]
+        self.active_coins:   list = ["BTC", "ETH", "SOL", "XRP"]
         self._custom_bet_pending = None   # {coin, direction} waiting for amount
+        self.get_health:     Optional[Callable] = None    # () → dict
 
         if TELEGRAM_OK and BOT_TOKEN and CHAT_ID:
             self._start_thread()
@@ -104,6 +105,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("position",  self._cmd_position))
         app.add_handler(CommandHandler("daily_pnl", self._cmd_daily_pnl))
         app.add_handler(CommandHandler("trend",     self._cmd_trend))
+        app.add_handler(CommandHandler("health",    self._cmd_health))
         app.add_handler(CommandHandler("hide",      self._cmd_hide))
         app.add_handler(CallbackQueryHandler(self._on_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
@@ -127,6 +129,7 @@ class TelegramBot:
                 BotCommand("daily_pnl", "📅 Last 7 days P&L"),
                 BotCommand("stop",      "⏸ Pause / Resume bot"),
                 BotCommand("trend",     "📉 10-candle history"),
+                BotCommand("health",    "🏥 System health"),
             ])
             logging.info("[TG] ✅ Bot commands menu registered")
         except Exception as e:
@@ -195,8 +198,8 @@ class TelegramBot:
         return ReplyKeyboardMarkup(
             [
                 [KeyboardButton("📊 Live"),    KeyboardButton("💰 Balance"), KeyboardButton("📌 Position")],
-                [KeyboardButton("📈 History"), KeyboardButton("📅 PnL"),     KeyboardButton("⏸ Stop/Resume")],
-                [KeyboardButton("📉 Trend"),     KeyboardButton("🎯 Manual Bet"), KeyboardButton("🔄 Refresh")],
+                [KeyboardButton("📈 History"), KeyboardButton("📅 PnL"),     KeyboardButton("🏥 Health")],
+                [KeyboardButton("📉 Trend"),     KeyboardButton("🎯 Manual Bet"), KeyboardButton("⏸ Stop/Resume")],
             ],
             resize_keyboard=True,
             is_persistent=True,
@@ -318,6 +321,25 @@ class TelegramBot:
             f"*📅 Daily PNL (last 7 days)*\n\n{summary}",
             parse_mode="Markdown"
         )
+
+    # ── /health ────────────────────────────────────────────────────────────────
+    async def _cmd_health(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not self.get_health:
+            await update.message.reply_text("Health data not available.")
+            return
+            
+        h = self.get_health()
+        status = "🟢 OK" if h.get("ok") else "🔴 ERROR"
+        
+        lines = [
+            f"OVERALL  → {status}",
+            f"UPTIME   → {h.get('uptime', '0h')}",
+            f"WS FEED  → {'✅ CONNECTED' if h.get('ws_connected') else '❌ DISCONNECTED'}",
+            f"REDEEM   → {h.get('redeem_status', 'Idle')}",
+            f"POL BAL  → {h.get('pol_balance', 0.0):.2f} POL",
+            f"LOG SIZE → {h.get('log_size', '0 KB')}",
+        ]
+        await update.message.reply_text(_box("🏥 SYSTEM HEALTH", lines), parse_mode="Markdown")
 
     async def _cmd_trend(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show clean trend summary for all coins."""
@@ -543,6 +565,7 @@ class TelegramBot:
             "📌 Position":   self._cmd_position,
             "📈 History":    self._cmd_history,
             "📅 PnL":       self._cmd_daily_pnl,
+            "🏥 Health":    self._cmd_health,
             "⏸ Stop/Resume": self._cmd_stop,
             "📉 Trend":      self._cmd_trend,
             "🎯 Manual Bet": self._cmd_manual_bet,

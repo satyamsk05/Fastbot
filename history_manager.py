@@ -92,7 +92,7 @@ def log_bet_placed(coin: str, direction: str, amount: float,
         _write(BET_FILE, data)
 
 
-def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float):
+def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float, fee: float = 0.0):
     """Update result of a bet after resolution."""
     with _lock:
         data = _read(BET_FILE)
@@ -102,6 +102,7 @@ def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float):
             if bet["coin"] == coin and bet["market_ts"] == market_ts and bet["result"] is None:
                 bet["result"] = "WIN" if won else "LOSS"
                 bet["pnl"]    = round(pnl, 2)
+                bet["fee"]    = round(fee, 2)
                 bet["resolved_at"] = int(time.time())
                 break
         _write(BET_FILE, data)
@@ -213,7 +214,30 @@ def record_pnl(pnl: float):
         if not isinstance(data, dict):
             data = {}
         today = _today_str()
-        data[today] = round(data.get(today, 0.0) + pnl, 2)
+        
+        # Support both old flat format and new dict format
+        if today not in data:
+            data[today] = {"pnl": 0.0, "fee": 0.0}
+        elif isinstance(data[today], (int, float)):
+            data[today] = {"pnl": float(data[today]), "fee": 0.0}
+            
+        data[today]["pnl"] = round(data[today]["pnl"] + pnl, 2)
+        _write(DAILY_PNL_FILE, data)
+
+def record_fee(fee: float):
+    """Add fee to today's total."""
+    with _lock:
+        data = _read(DAILY_PNL_FILE)
+        if not isinstance(data, dict):
+            data = {}
+        today = _today_str()
+        
+        if today not in data:
+            data[today] = {"pnl": 0.0, "fee": 0.0}
+        elif isinstance(data[today], (int, float)):
+            data[today] = {"pnl": float(data[today]), "fee": 0.0}
+            
+        data[today]["fee"] = round(data[today]["fee"] + fee, 2)
         _write(DAILY_PNL_FILE, data)
 
 
@@ -233,12 +257,16 @@ def get_pnl_summary(days: int = 7) -> str:
     recent = list(data.items())[-days:]
     lines = []
     total = 0.0
-    for day, pnl in reversed(recent):
+    for day, stats in reversed(recent):
+        pnl = stats["pnl"] if isinstance(stats, dict) else stats
+        fee = stats.get("fee", 0.0) if isinstance(stats, dict) else 0.0
+        
         sign  = "+" if pnl >= 0 else ""
         emoji = "🟢" if pnl >= 0 else "🔴"
-        lines.append(f"{emoji} {day}: {sign}${pnl:.2f}")
+        lines.append(f"{emoji} {day}: {sign}${pnl:.2f} (Fee: ${fee:.2f})")
         total += pnl
+    
     sign  = "+" if total >= 0 else ""
-    lines.append(f"——————————")
-    lines.append(f"Total : {sign}${total:.2f}")
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"Net PnL : {sign}${total:.2f}")
     return "\n".join(lines)

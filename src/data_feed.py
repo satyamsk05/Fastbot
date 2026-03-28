@@ -49,7 +49,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0
+                'market_start_price': 0.0,
+                'last_msg_time': time.time()  # ✅ Added
             },
             'eth': {
                 'slug': '',
@@ -68,7 +69,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0
+                'market_start_price': 0.0,
+                'last_msg_time': time.time()  # ✅ Added
             },
             'sol': {
                 'slug': '',
@@ -87,7 +89,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0  # Not used for SOL (no price feed)
+                'market_start_price': 0.0, # Not used for SOL (no price feed)
+                'last_msg_time': time.time()  # ✅ Added: Track WebSocket health
             },
             'xrp': {
                 'slug': '',
@@ -106,7 +109,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0  # Not used for XRP (no price feed)
+                'market_start_price': 0.0,
+                'last_msg_time': time.time()  # Track WebSocket health
             }
         }
         
@@ -142,12 +146,12 @@ class DataFeed:
         # Using REST API takingAmount/makingAmount instead!
         print(f"[DATA] ℹ️  Position tracking via REST API responses")
         
-        # Start local timer update (fixes timer freeze)
-        timer_thread = threading.Thread(target=self._timer_worker, daemon=True)
-        timer_thread.start()
-        self.threads.append(timer_thread)
+        # Start watchdog to monitor for stalled connections
+        watchdog_thread = threading.Thread(target=self._watchdog_worker, daemon=True)
+        watchdog_thread.start()
+        self.threads.append(watchdog_thread)
         
-        print("[DATA] All feeds started: 4 Polymarket orderbooks")
+        print("[DATA] All feeds started: 4 Polymarket orderbooks + Watchdog")
     
     def stop(self):
         """Stop all data streams"""
@@ -187,8 +191,9 @@ class DataFeed:
                 'price': price,
                 'market_start_price': market['market_start_price'],
                 'seconds_till_end': market['seconds_till_end'],
-                'market_slug': market['slug'],
+                'market_slug': market.get('slug', ''),
                 'confidence': confidence,
+                'last_msg_time': market.get('last_msg_time', 0.0),
                 'coin': coin
             }
     
@@ -309,11 +314,13 @@ class DataFeed:
                 ws = websocket.WebSocketApp(
                     ws_url,
                     on_message=lambda ws, msg: self._on_pm_message(msg, tokens, coin),
-                    on_error=lambda ws, err: None,
-                    on_close=lambda ws, code, reason: None
+                    on_error=lambda ws, err: print(f"[PM-{coin.upper()}] WS ERROR: {err}"),
+                    on_close=lambda ws, code, reason: print(f"[PM-{coin.upper()}] WS CLOSED: {code} / {reason}")
                 )
                 
                 ws_ref[0] = ws
+                with self.locks[coin]:
+                    self.markets[coin]['ws'] = ws
                 
                 def on_open(ws):
                     sub_msg = {
@@ -451,6 +458,9 @@ class DataFeed:
                         if price != old_down_bid:
                             price_changed = True
                 
+                # ✅ Refresh global market health timer
+                self.markets[coin]['last_msg_time'] = time.time()
+                
                 # Trigger callbacks if price changed
                 if price_changed:
                     up_ask = self.markets[coin]['up_ask']
@@ -530,9 +540,31 @@ class DataFeed:
             # Update each coin's timer independently (fully parallel)
             for coin in ['btc', 'eth', 'sol', 'xrp']:
                 with self.locks[coin]:
-                    market_end_time = self.markets[coin]['market_end_time']
-                    self.markets[coin]['seconds_till_end'] = max(0, market_end_time - current_time)
+                    market_end_time = self.markets[coin].get('market_end_time', 0)
+                    if market_end_time > 0:
+                        self.markets[coin]['seconds_till_end'] = max(0, market_end_time - current_time)
             time.sleep(1)
+
+    def _watchdog_worker(self):
+        """Monitor messages for all 4 markets. If any stall > 30s, we disconnect/reconnect."""
+        STALL_THRESHOLD = 35  # seconds
+        while not self.stop_event.is_set():
+            now = time.time()
+            for coin in ['btc', 'eth', 'sol', 'xrp']:
+                with self.locks[coin]:
+                    last_msg = self.markets[coin].get('last_msg_time', 0.0)
+                    # Don't stall if we just started (wait at least STALL_THRESHOLD)
+                    if last_msg > 0 and (now - last_msg > STALL_THRESHOLD):
+                        print(f"[WATCHDOG] 🚨 Data stall on {coin.upper()}! (No msg for {int(now-last_msg)}s). Reconnecting...")
+                        # Reset timestamp to avoid double-triggers
+                        self.markets[coin]['last_msg_time'] = now
+                        ws = self.markets[coin].get('ws')
+                        if ws:
+                            try:
+                                ws.close()
+                            except:
+                                pass
+            time.sleep(5)
     
     def _user_channel_worker(self):
         """

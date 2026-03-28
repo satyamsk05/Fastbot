@@ -55,14 +55,13 @@ def _today_str() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 def reset_on_startup():
     """
-    Reset bet_history, open_positions, and candle_history on every bot start.
-    daily_pnl is KEPT across restarts.
+    Reset open_positions and candle_history on every bot start.
+    bet_history and daily_pnl are KEPT across restarts.
     """
     with _lock:
-        _write(BET_FILE,      [])
         _write(POSITION_FILE, {})
         _write(CANDLE_FILE,   {})
-    print("[HISTORY] Bet, Position, and Candle history reset on startup.")
+    print("[HISTORY] Position and Candle history reset on startup (Bets preserved).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -89,11 +88,12 @@ def log_bet_placed(coin: str, direction: str, amount: float,
             "placed_at":  int(time.time()),
             "result":     None,               # WIN / LOSS — filled on resolution
             "pnl":        None,
+            "fee":        0.0,                # Added: 0.24% estimation
         })
         _write(BET_FILE, data)
 
 
-def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float):
+def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float, fee: float = 0.0):
     """Update result of a bet after resolution."""
     with _lock:
         data = _read(BET_FILE)
@@ -102,7 +102,8 @@ def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float):
         for bet in reversed(data):
             if bet["coin"] == coin and bet["market_ts"] == market_ts and bet["result"] is None:
                 bet["result"] = "WIN" if won else "LOSS"
-                bet["pnl"]    = round(pnl, 2)
+                bet["pnl"]    = round(pnl, 4)
+                bet["fee"]    = round(fee, 4)
                 bet["resolved_at"] = int(time.time())
                 break
         _write(BET_FILE, data)
@@ -169,11 +170,11 @@ def get_7day_trend_bar(coin: str) -> str:
     candles = get_candle_history(coin, n=48)
     if not candles:
         return "(no data)"
-    bar = "".join("🟩" if c["dir"] == "UP" else "🟥" for c in candles)
+    bar = "".join("🟢" if c["dir"] == "UP" else "🔴" for c in candles)
     # Add summary stats
     ups   = sum(1 for c in candles if c["dir"] == "UP")
     downs = len(candles) - ups
-    return f"{bar}\n  UP: {ups} | DOWN: {downs} | Last 48 candles"
+    return f"{bar}\n  🟢 UP: {ups} | 🔴 DOWN: {downs} | Last 48 candles"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,7 +223,30 @@ def record_pnl(pnl: float):
         if not isinstance(data, dict):
             data = {}
         today = _today_str()
-        data[today] = round(data.get(today, 0.0) + pnl, 2)
+        
+        # Support new dictionary format for fee tracking
+        day_data = data.get(today, {"pnl": 0.0, "fee": 0.0})
+        if isinstance(day_data, (int, float)):
+            day_data = {"pnl": float(day_data), "fee": 0.0}
+            
+        day_data["pnl"] = round(day_data["pnl"] + pnl, 4)
+        data[today] = day_data
+        _write(DAILY_PNL_FILE, data)
+
+def record_fee(fee: float):
+    """Add fee to today's total."""
+    with _lock:
+        data = _read(DAILY_PNL_FILE)
+        if not isinstance(data, dict):
+            data = {}
+        today = _today_str()
+        
+        day_data = data.get(today, {"pnl": 0.0, "fee": 0.0})
+        if isinstance(day_data, (int, float)):
+            day_data = {"pnl": float(day_data), "fee": 0.0}
+            
+        day_data["fee"] = round(day_data["fee"] + fee, 4)
+        data[today] = day_data
         _write(DAILY_PNL_FILE, data)
 
 
@@ -237,17 +261,19 @@ def get_pnl_summary(days: int = 7) -> str:
     data = get_daily_pnl()
     if not data:
         return "(no data yet)"
-    # Sort by date — simple string sort works for "DD Mon" if same month
-    # Use reverse insertion order (most recent first)
+    
     recent = list(data.items())[-days:]
     lines = []
     total = 0.0
-    for day, pnl in reversed(recent):
-        sign  = "+" if pnl >= 0 else ""
+    for day_label, val in reversed(recent):
+        pnl = val.get("pnl", 0.0) if isinstance(val, dict) else float(val)
+        fee = val.get("fee", 0.0) if isinstance(val, dict) else 0.0
+        sign = "+" if pnl >= 0 else ""
         emoji = "🟢" if pnl >= 0 else "🔴"
-        lines.append(f"{emoji} {day}: {sign}${pnl:.2f}")
+        lines.append(f"{emoji} {day_label}: {sign}${pnl:.2f} (Fee: ${fee:.2f})")
         total += pnl
-    sign  = "+" if total >= 0 else ""
-    lines.append(f"——————————")
-    lines.append(f"Total : {sign}${total:.2f}")
+    
+    sign = "+" if total >= 0 else ""
+    lines.append(f"————————──────")
+    lines.append(f"Net Total: {sign}${total:.2f}")
     return "\n".join(lines)

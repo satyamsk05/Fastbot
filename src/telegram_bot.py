@@ -72,8 +72,9 @@ class TelegramBot:
         self.on_stop:        Optional[Callable] = None    # () → None   (pause trading)
         self.on_manual_bet:  Optional[Callable] = None   # (amount) → str  (result message)
         self.is_paused:      bool = False
-        self.active_coins:   list = ["BTC", "ETH", "SOL"]
+        self.active_coins:   list = ["BTC", "ETH", "SOL", "XRP"]
         self._custom_bet_pending = None   # {coin, direction} waiting for amount
+        self.get_health:     Optional[Callable] = None    # () → dict
 
         if TELEGRAM_OK and BOT_TOKEN and CHAT_ID:
             self._start_thread()
@@ -104,6 +105,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("position",  self._cmd_position))
         app.add_handler(CommandHandler("daily_pnl", self._cmd_daily_pnl))
         app.add_handler(CommandHandler("trend",     self._cmd_trend))
+        app.add_handler(CommandHandler("health",    self._cmd_health))
         app.add_handler(CommandHandler("hide",      self._cmd_hide))
         app.add_handler(CallbackQueryHandler(self._on_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
@@ -127,6 +129,7 @@ class TelegramBot:
                 BotCommand("daily_pnl", "📅 Last 7 days P&L"),
                 BotCommand("stop",      "⏸ Pause / Resume bot"),
                 BotCommand("trend",     "📉 10-candle history"),
+                BotCommand("health",    "🏥 System health status"),
             ])
             logging.info("[TG] ✅ Bot commands menu registered")
         except Exception as e:
@@ -192,11 +195,12 @@ class TelegramBot:
     # ── keyboard helper ───────────
     def _get_kb(self):
         from telegram import ReplyKeyboardMarkup, KeyboardButton
+        stop_label = "▶ Start" if self.is_paused else "⏸ Stop"
         return ReplyKeyboardMarkup(
             [
                 [KeyboardButton("📊 Live"),    KeyboardButton("💰 Balance"), KeyboardButton("📌 Position")],
-                [KeyboardButton("📈 History"), KeyboardButton("📅 PnL"),     KeyboardButton("⏸ Stop/Resume")],
-                [KeyboardButton("📉 Trend"),     KeyboardButton("🎯 Manual Bet"), KeyboardButton("🔄 Refresh")],
+                [KeyboardButton("📈 History"), KeyboardButton("📅 PnL"),     KeyboardButton("🏥 Health")],
+                [KeyboardButton("📉 Trend"),     KeyboardButton("🎯 Manual Bet"), KeyboardButton(stop_label)],
             ],
             resize_keyboard=True,
             is_persistent=True,
@@ -271,9 +275,11 @@ class TelegramBot:
         self.is_paused = not self.is_paused
         if self.on_stop:
             self.on_stop(self.is_paused)
-        status = "⏸ PAUSED — no new bets will be placed." if self.is_paused \
-                 else "▶ RESUMED — trading active."
-        await update.message.reply_text(f"*Bot {status}*", parse_mode="Markdown")
+        
+        status = "⏸ PAUSED — no new bets." if self.is_paused else "▶ RESUMED — active."
+        await update.message.reply_text(f"*Bot {status}*", 
+                                        parse_mode="Markdown",
+                                        reply_markup=self._get_kb())
 
     # ── /balance ───────────────────────────────────────────────────────────────
     async def _cmd_balance(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -318,6 +324,47 @@ class TelegramBot:
             f"*📅 Daily PNL (last 7 days)*\n\n{summary}",
             parse_mode="Markdown"
         )
+
+    # ── /health ────────────────────────────────────────────────────────────────
+    async def _cmd_health(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not self.get_health or not self.get_live_state:
+            await update.message.reply_text("Health data not available.")
+            return
+
+        h = self.get_health()
+        states = self.get_live_state()
+        now = time.time()
+        
+        status = "🟢 OK" if h.get("ok") else "🔴 ERROR"
+        
+        lines = [
+            f"*OVERALL*  → {status}",
+            f"*UPTIME*   → {h.get('uptime', '0h')}",
+            f"*REDEEM*   → {h.get('redeem_status', 'Idle')}",
+            f"*POL BAL*  → {h.get('pol_balance', 0.0):.2f} POL",
+            f"*LOG SIZE* → {h.get('log_size', '0 KB')}",
+            "──────────────────",
+            "📡 *DATA FEED STATUS:*"
+        ]
+        
+        for coin in self.active_coins:
+            st = states.get(coin, {})
+            last_ms = st.get("last_msg_time", 0.0)
+            diff = int(now - last_ms) if last_ms > 0 else 999
+            
+            up_p = st.get("up_ask", 0.0)
+            dn_p = st.get("down_ask", 0.0)
+            
+            # Use new thresholds for UI
+            emoji = "🟢" if diff < 30 else "🟡" if diff < 60 else "🔴"
+            label = "OK" if diff < 30 else "LAG" if diff < 60 else "STALE"
+            
+            lines.append(f"{emoji} *{coin:<3}* [{label}] ({diff}s)")
+            lines.append(f"      📈 *{up_p:.3f}* | 📉 *{dn_p:.3f}*")
+            lines.append("      ┈┈┈┈┈┈┈┈┈┈")
+            
+        inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_health")]])
+        await update.message.reply_text(_box("🏥 SYSTEM HEALTH", lines), parse_mode="Markdown", reply_markup=inline_kb)
 
     async def _cmd_trend(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show clean trend summary for all coins."""
@@ -429,20 +476,30 @@ class TelegramBot:
         header = self._manual_header(coin or "BTC")
         lines = [header]
         
-        if step >= 1:
-            lines.append("Step 1: 🪙 *Coin Select*")
-            if coin:
-                lines.append(f"               *{coin} ✅*")
-                lines.append("")
+        if step == 1:
+            lines.append("Step 1: 🪙 *Select Coin*")
+            lines.append("Choose a market to trade:")
         
         if step >= 2:
-            lines.append("Step 2: 💰 *Amount*")
-            if amount:
-                lines.append(f"               *${amount:.0f} ✅*")
-                lines.append("")
+            lines.append(f"Step 1: 🪙 *Coin* → {coin} ✅")
+            if step == 2:
+                lines.append("\nStep 2: 💰 *Select Amount*")
+                lines.append("Choose investment in USDC:")
         
-        if step == 3:
-            lines.append("Step 3: 📈 *Direction*")
+        if step >= 3:
+            lines.append(f"Step 2: 💰 *Amount* → ${amount:.0f} ✅")
+            if step == 3:
+                # Add live price context for the selected coin
+                price_info = ""
+                if self.get_live_state:
+                    st = self.get_live_state().get(coin, {})
+                    up = st.get("up_ask", 0.0)
+                    dn = st.get("down_ask", 0.0)
+                    price_info = f"\n📊 *Market:* UP at ${up:.2f} | DOWN at ${dn:.2f}"
+                
+                lines.append(f"{price_info}\n")
+                lines.append("Step 3: 📈 *Select Direction*")
+                lines.append("Finalize your position:")
             
         return "\n".join(lines)
 
@@ -486,6 +543,39 @@ class TelegramBot:
                     await query.edit_message_text(content, parse_mode="Markdown", reply_markup=inline_kb)
                 except Exception:
                     pass # ignore "message is not modified"
+            return
+
+        # ── Refresh Health Status ──
+        if data == "refresh_health":
+            if not self.get_health or not self.get_live_state:
+                return
+            h = self.get_health()
+            states = self.get_live_state()
+            now = time.time()
+            status = "🟢 OK" if h.get("ok") else "🔴 ERROR"
+            lines = [
+                f"*OVERALL*  → {status}",
+                f"*UPTIME*   → {h.get('uptime', '0h')}",
+                f"*REDEEM*   → {h.get('redeem_status', 'Idle')}",
+                f"*POL BAL*  → {h.get('pol_balance', 0.0):.2f} POL",
+                f"*LOG SIZE* → {h.get('log_size', '0 KB')}",
+                "──────────────────",
+                "📡 *DATA FEED STATUS:*"
+            ]
+            for coin in self.active_coins:
+                st = states.get(coin, {})
+                diff = int(now - st.get("last_msg_time", 0.0)) if st.get("last_msg_time") else 999
+                emoji = "🟢" if diff < 30 else "🟡" if diff < 60 else "🔴"
+                label = "OK" if diff < 30 else "LAG" if diff < 60 else "STALE"
+                lines.append(f"{emoji} *{coin:<3}* [{label}] ({diff}s)")
+                lines.append(f"      📈 *{st.get('up_ask',0):.3f}* | 📉 *{st.get('down_ask',0):.3f}*")
+                lines.append("      ┈┈┈┈┈┈┈┈┈┈")
+            
+            inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_health")]])
+            try:
+                await query.edit_message_text(_box("🏥 SYSTEM HEALTH", lines), parse_mode="Markdown", reply_markup=inline_kb)
+            except:
+                pass
             return
 
         # ── Step 1: Coin Selection ──────────────
@@ -544,10 +634,15 @@ class TelegramBot:
             "📈 History":    self._cmd_history,
             "📅 PnL":       self._cmd_daily_pnl,
             "⏸ Stop/Resume": self._cmd_stop,
+            "⏸ Stop":        self._cmd_stop,
+            "▶ Start":       self._cmd_stop,
+            "▶ Resume":      self._cmd_stop,
             "📉 Trend":      self._cmd_trend,
             "🎯 Manual Bet": self._cmd_manual_bet,
             "🔄 Refresh":    self._cmd_start,
-            "⌨️ Hide Menu":   self._cmd_hide,
+            "🏥 Health":     self._cmd_health,
+            "⌨️ Hide":       self._cmd_hide,
+            "⌨️ Hide Menu":  self._cmd_hide,
         }
         if text in button_map:
             await button_map[text](update, ctx)
@@ -619,11 +714,24 @@ class TelegramNotifier:
                       step: int, closes: list):
         arrow   = "UP" if direction == "YES" else "DOWN"
         emoji   = "🟢" if arrow == "UP" else "🔴"
-        streak  = "↑↑↑" if direction == "NO" else "↓↓↓"   # streak that triggered
-        self.send(_box(f"🎯 SIGNAL {coin}", [
+        
+        # ── Visual Streak Analysis ──
+        # If betting UP (YES), the previous streak was DOWN (red)
+        # If betting DOWN (NO), the previous streak was UP (green)
+        streak_emoji = "🔴🔴🔴" if direction == "YES" else "🟢🟢🟢"
+        
+        # ── Market Context ──
+        price_str = "???"
+        if self._bot.get_live_state:
+            st = self._bot.get_live_state().get(coin, {})
+            p = st.get("up_ask" if direction == "YES" else "down_ask", 0.0)
+            price_str = f"${p:.2f}"
+            
+        self.send(_box(f"🎯 SIGNAL ALERT: {coin}", [
             f"SIDE   → {emoji} {arrow}",
             f"BET    → ${amount:.0f} (L{step+1})",
-            f"STREAK → {streak}",
+            f"STREAK → {streak_emoji}",
+            f"PRICE  → {price_str}",
             f"CL_AVG → {sum(closes[-3:])/3:.3f}",
         ]))
 

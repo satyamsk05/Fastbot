@@ -71,6 +71,18 @@ logging.basicConfig(
 for lib in ("urllib3","requests","httpx","telegram","apscheduler"):
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+def get_coin_logger(coin: str):
+    """Returns a thread-safe logger for a specific coin."""
+    logger = logging.getLogger(coin.upper())
+    if not logger.handlers:
+        path = f"logs/{coin.upper()}.log"
+        handler = logging.FileHandler(path)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False 
+    return logger
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +247,54 @@ def _place(token_id: str, amount: float, coin: str,
         return False, price, ot_lbl
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SETTLEMENT (Auto-Redeem)
+# ═══════════════════════════════════════════════════════════════════════════════
+_redeem_status = "Idle"
+
+def _redeem_all():
+    global _redeem_status
+    if DRY_RUN:
+        _redeem_status = "Dry Run"
+        return
+
+    _redeem_status = "Checking..."
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+        from py_clob_client.constants import POLYGON
+
+        creds  = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
+        pk     = PRIVATE_KEY.lstrip("0x") if PRIVATE_KEY else ""
+        client = ClobClient(CLOB_HOST, chain_id=POLYGON, key=pk, creds=creds,
+                            signature_type=2 if FUNDER_ADDRESS else 1,
+                            funder=FUNDER_ADDRESS or None)
+
+        url = f"https://data-api.polymarket.com/positions?user={WALLET_ADDRESS}&redeemable=true"
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            _redeem_status = "API Error"
+            return
+
+        positions = r.json()
+        if not positions:
+            _redeem_status = "Nothing to redeem"
+            return
+        
+        _redeem_status = f"Redeeming {len(positions)}..."
+        for pos in positions:
+            cond = pos.get("conditionId")
+            if not cond: continue
+            try:
+                client.redeem_positions(condition_id=cond)
+                time.sleep(2)
+            except: pass
+            
+        _redeem_status = "Last check success"
+    except Exception as e:
+        logging.error(f"[SETTLE] {e}")
+        _redeem_status = "Error"
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PER-COIN PROCESSOR
 # ═══════════════════════════════════════════════════════════════════════════════
 class CoinProc:
@@ -242,6 +302,7 @@ class CoinProc:
         self.coin = coin.upper()
         self.processed_ts = 0
         self.warmup = 0
+        self.log = get_coin_logger(coin)
 
     def tick(self, now: int) -> Optional[Dict]:
         """Run every second. Returns signal dict or None."""
@@ -313,14 +374,17 @@ class CoinProc:
             return
 
         won    = (cp > 0.5) if direction == "YES" else (cp < 0.5)
-        # Binary option payout is 1 USDC per share if won.
-        payout = (amount / pend["price"]) if won else 0.0
-        pnl    = (payout - amount) if won else -amount
+        payout = round(amount / entry_price, 4) if won else 0.0
+        
+        # ── NET PnL Calculation (deducting 0.24% estimated fee) ──
+        fee    = (payout * 0.0024) if won else (amount * 0.0024)
+        pnl    = round(payout - amount - fee, 4) if won else -round(amount + fee, 4)
 
         _strat.on_result(coin, won)
-        hm.log_bet_result(coin, closed_ts, won, pnl)
+        hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
         hm.close_position(coin)
         hm.record_pnl(pnl)
+        hm.record_fee(fee)
 
         if DRY_RUN and won:
             _vbal_write(_vbal_read() + payout)
@@ -381,9 +445,11 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
     except Exception:
         price = 0.50 # fallback
 
-    # ── FIXED: Apply 0.49-0.54 bracket for L2-L5 (Step > 0) ──
-    if step > 0:
-        price = max(0.49, min(price, 0.54))
+    # ── FIXED: Price bracket to avoid outliers ──
+    if step == 0:
+        price = max(0.35, min(price, 0.65))  # L1 bracket: 35c to 65c
+    else:
+        price = max(0.49, min(price, 0.54))  # L2-L5 bracket: 49c to 54c
 
     ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
@@ -468,9 +534,10 @@ def main():
         for c in ACTIVE_COINS:
             st = data_feed.get_state(c.lower())
             if st:
-                out[c] = {"up_ask": st.get("up_ask",0),
-                           "down_ask": st.get("down_ask",0),
-                           "seconds_till_end": st.get("seconds_till_end",900)}
+                out[c] = {"up_ask": st.get("up_ask", 0),
+                           "down_ask": st.get("down_ask", 0),
+                           "seconds_till_end": st.get("seconds_till_end", 900),
+                           "last_msg_time": st.get("last_msg_time", 0.0)}
         return out
     tg_bot.get_live_state = _live
 
@@ -514,8 +581,10 @@ def main():
         token_id = tkns["yes_token"] if direction == "YES" else tkns["no_token"]
         step = _mg.get_step(coin)
 
-        # ── FIXED: Apply 0.49-0.54 bracket for L2-L5 (Step > 0) ──
-        if step > 0:
+        # ── FIXED: Price bracket to avoid outliers ──
+        if step == 0:
+            price = max(0.35, min(price, 0.65))
+        else:
             price = max(0.49, min(price, 0.54))
 
         ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
@@ -535,6 +604,40 @@ def main():
             return f"✅ *Manual bet placed!*\n{coin}  {arrow}  ${amount:.0f}  @ {price:.3f} ({ot})"
         return f"❌ Order failed for {coin}."
     tg_bot.on_manual_bet = _manual
+
+    _start_time = time.time()
+    def _health():
+        up_sec = int(time.time() - _start_time)
+        h, m = divmod(up_sec // 60, 60)
+        uptime = f"{h}h {m}m"
+        
+        pol_bal = 0.0
+        if not DRY_RUN:
+            try:
+                from web3 import Web3
+                w3 = Web3(Web3.HTTPProvider(RPC_URL))
+                if w3.is_connected():
+                    addr = FUNDER_ADDRESS or WALLET_ADDRESS
+                    if addr:
+                        pol_bal = w3.eth.get_balance(w3.to_checksum_address(addr)) / 1e18
+            except: pass
+            
+        log_sz = "0 KB"
+        try:
+            sz = os.path.getsize("logs/bot.log")
+            if sz > 1024*1024: log_sz = f"{sz/(1024*1024):.1f} MB"
+            else: log_sz = f"{sz/1024:.1f} KB"
+        except: pass
+
+        return {
+            "ok": not _stop.is_set(),
+            "uptime": uptime,
+            "ws_connected": data_feed.is_alive() if hasattr(data_feed, "is_alive") else True,
+            "redeem_status": _redeem_status,
+            "pol_balance": pol_bal,
+            "log_size": log_sz
+        }
+    tg_bot.get_health = _health
 
     # Signal handler
     def _shutdown(sig, frame):
@@ -571,6 +674,15 @@ def main():
             time.sleep(DASHBOARD_REFRESH)
 
     threading.Thread(target=_dash, daemon=True, name="dashboard").start()
+
+    # Settlement loop (every 30m)
+    def _settle_loop():
+        while not _stop.is_set():
+            _redeem_all()
+            for _ in range(1800):
+                if _stop.is_set(): break
+                time.sleep(1)
+    threading.Thread(target=_settle_loop, daemon=True, name="settle").start()
 
     # Coin processors
     procs = {c: CoinProc(c) for c in ACTIVE_COINS}
