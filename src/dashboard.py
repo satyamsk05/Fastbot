@@ -1,145 +1,183 @@
 """
-Terminal Dashboard
-4coinsbot's rich terminal UI + tredebot's Martingale state overlay.
-Shows: orderbook prices, streak state, martingale step, pending bets.
+Phase 06: Visual Overhaul (Terminal & Rich) — Scroll Fix
+══════════════════════════════════════════════════════
+A high-fidelity terminal dashboard using 'rich.live'.
+Features:
+- Fixed position rendering (no scrolling)
+- Thread-safe internal logging panel
+- Sentiment-aware color coding
+- Real-time 3-candle trend visualizer [ 🟢 🟢 🔴 ]
+══════════════════════════════════════════════════════
 """
 import time
+import threading
 from typing import Dict, List, Optional
+from datetime import datetime
+
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.text import Text
 
 from strategy import BET_SEQUENCE, STREAK_THRESHOLD
 
 COINS = ["BTC", "ETH", "SOL", "XRP"]
 
-
 class Dashboard:
-    """Multi-coin terminal dashboard with streak/martingale overlay."""
+    """Premium Terminal Dashboard using Rich Live (Scroll-Free)."""
 
-    def __init__(self, width: int = 160, coins: list = None):
-        self.width = width
+    def __init__(self, coins: list = None):
         self.start_time = time.time()
         self.coins = [c.upper() for c in (coins or COINS)]
-        self._error_log: List[str] = []
+        self._log_buffer: List[str] = []
+        self._lock = threading.Lock()
+        self.console = Console()
+        self._live: Optional[Live] = None
 
-    # ── public ───────────────────────────────────────────────────────────────
-    def render(self, market_states: Dict, mg_steps: Dict,
-               pending: Dict, trade_log: List, wallet_bal: float,
-               dry_run: bool = True):
-        print("\033[2J\033[H", end="")   # clear screen
-        lines = self._build(market_states, mg_steps, pending,
-                            trade_log, wallet_bal, dry_run)
-        print(lines, end="", flush=True)
+    def log(self, msg: str, style: str = "white"):
+        """Add a message to the internal system log panel."""
+        ts = time.strftime("%H:%M:%S")
+        with self._lock:
+            self._log_buffer.append(f"[{ts}] {msg}")
+            self._log_buffer = self._log_buffer[-10:] # Keep last 10
 
     def log_error(self, msg: str):
-        ts = time.strftime("%H:%M:%S")
-        self._error_log.append(f"[{ts}] ✗ {msg[:70]}")
-        self._error_log = self._error_log[-8:]
+        self.log(f"✗ {msg}", style="bold red")
 
-    # ── build ─────────────────────────────────────────────────────────────────
-    def _build(self, market_states, mg_steps, pending, trade_log,
-               wallet_bal, dry_run) -> str:
-        W = self.width
-        out = []
+    def live_context(self):
+        """Returns the Live context manager for use in 'with' blocks."""
+        # Note: We don't use the refresh_per_second here because main loop calls render()
+        self._live = Live(None, console=self.console, refresh_per_second=4, screen=False)
+        return self._live
 
-        runtime = self._fmt_time(time.time() - self.start_time)
-        mode_tag = "  ~ DRY RUN ~  " if dry_run else "  LIVE TRADING  "
-        out.append("=" * W)
-        out.append(
-            (f"  Polymarket Streak Bot  |  {runtime}  |  {mode_tag}"
-             f"  Balance: ${wallet_bal:,.2f} USDC").center(W)
+    def render(self, market_states: Dict, mg_steps: Dict,
+               pending: Dict, trade_log: List, wallet_bal: float,
+               dry_run: bool = True, candle_history: Dict = None):
+        """Updates the Live display with the latest layout."""
+        grid = self._build_layout(market_states, mg_steps, pending, 
+                                  trade_log, wallet_bal, dry_run, candle_history)
+        if self._live and self._live.is_started:
+            self._live.update(grid)
+        else:
+            # Fallback for when not in Live context
+            self.console.clear()
+            self.console.print(grid)
+
+    # ── builders ──────────────────────────────────────────────────────────────
+    def _build_layout(self, market_states, mg_steps, pending, trade_log,
+                      wallet_bal, dry_run, candle_history) -> Layout:
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="main", size=10),
+            Layout(name="bottom", size=8)
         )
-        out.append("=" * W)
-        out.append("")
 
-        ladder = "  ".join(f"L{i+1}=${b}" for i, b in enumerate(BET_SEQUENCE))
-        out.append(f"  Martingale Ladder: {ladder}   |   Signal: {STREAK_THRESHOLD}-streak reversal")
-        out.append("")
+        # 1. Header
+        runtime = self._fmt_time(time.time() - self.start_time)
+        mode = "[bold yellow]DRY RUN[/]" if dry_run else "[bold red]LIVE[/]"
+        header_text = Text.assemble(
+            (f" 🛰️  POLYMARKET COMMAND CENTER ", "bold cyan"),
+            f" | Uptime: [green]{runtime}[/] | Mode: {mode} | ",
+            (f"Wallet: [bold green]${wallet_bal:,.2f} USDC[/]", "")
+        )
+        layout["header"].update(Panel(header_text, border_style="cyan"))
 
-        out.append(f"+{'-'*(W-2)}+")
-        out.append(f"|{'  COIN STATUS':^{W-2}}|")
-        out.append(f"+{'-'*(W-2)}+")
+        # 2. Main Coin Table
+        table = Table(box=None, expand=True, padding=(0, 1))
+        table.add_column("Coin", justify="left", style="bold cyan", width=6)
+        table.add_column("Trend", justify="center", width=8)
+        table.add_column("Timer", justify="center", width=7)
+        table.add_column("UP/DN", justify="center", width=15)
+        table.add_column("Fav (Conf)", justify="center", width=12)
+        table.add_column("MG Step", justify="left")
+        table.add_column("Status", justify="left")
 
         for coin in self.coins:
-            ms   = (market_states or {}).get(coin, {})
+            ms = (market_states or {}).get(coin, {})
             step = (mg_steps or {}).get(coin, 0)
-            pen  = (pending  or {}).get(coin)
-            self._coin_row(out, coin, ms, step, pen, W)
-            out.append(f"|{'-'*(W-2)}|")
+            pen = (pending or {}).get(coin)
+            history = (candle_history or {}).get(coin, [])
+            
+            # Trend Visualizer
+            trend_str = ""
+            for c in history[-3:]:
+                trend_str += "🟢" if c.get("dir") == "UP" else "🔴"
+            if not trend_str: trend_str = "[grey37]- - -[/]"
 
-        out.append(f"+{'-'*(W-2)}+")
-        out.append("")
+            # Timer color
+            sec_left = ms.get("seconds_till_end", 900)
+            t_clr = "red" if sec_left < 120 else "yellow" if sec_left < 300 else "green"
+            timer_str = f"[{t_clr}]{self._fmt_time(sec_left)}[/]"
 
-        out.append("Recent Trades:")
-        if trade_log:
-            for t in list(reversed(trade_log))[:6]:
-                pnl  = t.get("pnl", 0)
-                sign = "+" if pnl >= 0 else ""
-                clr  = "\033[92m" if pnl >= 0 else "\033[91m"
-                rst  = "\033[0m"
-                out.append(
-                    f"  [{t['coin']:>3}]  {'UP YES' if t['direction']=='YES' else 'DN NO ':>6}"
-                    f"  {'WIN ' if t.get('won') else 'LOSS'}  "
-                    f"{clr}{sign}${pnl:.2f}{rst}"
-                )
-        else:
-            out.append("  (none yet)")
-        out.append("")
+            # Prices
+            up = ms.get("up_ask", 0.0)
+            dn = ms.get("down_ask", 0.0)
+            price_str = f"[green]{up:.3f}[/] / [red]{dn:.3f}[/]"
 
-        if self._error_log:
-            out.append("Errors:")
-            for e in self._error_log:
-                out.append(f"  {e}")
-            out.append("")
+            # Fav/Conf
+            fav = "UP" if up > dn else "DOWN"
+            fav_clr = "green" if fav == "UP" else "red"
+            conf = abs(up - dn)
+            fav_str = f"[{fav_clr}]{fav}[/] ({conf:.3f})"
 
-        out.append("-" * W)
-        out.append("[Q] Quit  |  [E] Emergency Stop  |  Ctrl+C Stop".center(W))
-        return "\n".join(out)
+            # MG Progress
+            progress = ""
+            for i in range(len(BET_SEQUENCE)):
+                if i < step: progress += "[green]■[/]"
+                elif i == step: progress += "[bold yellow]▶[/]"
+                else: progress += "[grey37]□[/]"
+            
+            bet_amt = BET_SEQUENCE[step] if step < len(BET_SEQUENCE) else BET_SEQUENCE[-1]
+            mg_str = f"{progress} [dim]L{step+1}[/]"
 
-    def _coin_row(self, out, coin, ms, step, pending, W):
-        up_ask   = ms.get("up_ask", 0.0)
-        dn_ask   = ms.get("down_ask", 0.0)
-        sec_left = ms.get("seconds_till_end", 900)
-        slug     = ms.get("market_slug", "---")
-        conf     = abs(up_ask - dn_ask)
-
-        fav = "UP  " if up_ask > dn_ask else "DOWN"
-
-        if sec_left < 60:
-            t_clr = "\033[91m"
-        elif sec_left < 180:
-            t_clr = "\033[93m"
-        else:
-            t_clr = "\033[0m"
-        rst = "\033[0m"
-
-        ladder_bar = ""
-        for i in range(len(BET_SEQUENCE)):
-            if i < step:
-                ladder_bar += "#"
-            elif i == step:
-                ladder_bar += ">"
+            # Status / Pending
+            if pen:
+                dir_emoji = "⬆️" if pen['direction'] == "YES" else "⬇️"
+                status_str = f"[bold white on blue] PENDING: {dir_emoji} {pen['direction']} ${pen['amount']:.0f} [/]"
             else:
-                ladder_bar += "."
-        bet_now = BET_SEQUENCE[step] if step < len(BET_SEQUENCE) else BET_SEQUENCE[-1]
+                status_str = "[dim]Waiting...[/]"
 
-        if pending:
-            pen_str = f"  PENDING: {'YES' if pending['direction']=='YES' else 'NO '} ${pending['amount']:.0f}"
+            table.add_row(coin, trend_str, timer_str, price_str, fav_str, mg_str, status_str)
+
+        layout["main"].update(Panel(table, title="[bold white]Market Activity[/]", border_style="grey37"))
+
+        # 3. Bottom (Trades & Logs)
+        log_layout = Layout()
+        log_layout.split_row(
+            Layout(name="trades", ratio=2),
+            Layout(name="logs", ratio=1)
+        )
+
+        # Recent Trades Panel
+        trades_text = Text()
+        if trade_log:
+            for t in list(reversed(trade_log))[:4]:
+                pnl = t.get("pnl", 0)
+                clr = "green" if pnl >= 0 else "red"
+                sign = "+" if pnl >= 0 else ""
+                dir_lbl = "UP" if t['direction'] == "YES" else "DOWN"
+                trades_text.append(f"• {t['coin']:>3} ", style="bold cyan")
+                trades_text.append(f"{dir_lbl:<5} ", style="dim")
+                trades_text.append(f"{'WIN' if t.get('won') else 'LOSS'} ", style=clr)
+                trades_text.append(f"{sign}${pnl:.2f}\n", style=f"bold {clr}")
         else:
-            pen_str = "  waiting for signal"
+            trades_text.append("Waiting for first trade...", style="dim")
+        
+        log_layout["trades"].update(Panel(trades_text, title="[bold]Recent Trades[/]", border_style="grey37"))
 
-        slug_short = slug.split("-")[-1] if slug else "---"
+        # System Logic Panel
+        sys_text = Text()
+        with self._lock:
+            for line in self._log_buffer:
+                sys_text.append(f"{line}\n", style="dim")
+        
+        log_layout["logs"].update(Panel(sys_text, title="[bold]System Log[/]", border_style="grey37"))
 
-        row1 = (
-            f"|  [{coin:>3}] {slug_short:<12}"
-            f"  Timer: {t_clr}{self._fmt_time(sec_left)}{rst}"
-            f"  UP:{up_ask:.3f}  DN:{dn_ask:.3f}  Fav:{fav}"
-            f"  Conf:{conf:.3f}"
-        )
-        row2 = (
-            f"|     MG: [{ladder_bar}] L{step+1} Bet=${bet_now}"
-            f"{pen_str}"
-        )
-        out.append(row1)
-        out.append(row2)
+        layout["bottom"].update(log_layout)
+        return layout
 
     @staticmethod
     def _fmt_time(secs: float) -> str:

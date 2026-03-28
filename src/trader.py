@@ -1,3 +1,4 @@
+import logging
 """
 Position management with support for multiple entries per market
 """
@@ -22,14 +23,14 @@ def set_order_executor(executor):
     """Inject OrderExecutor for real trading"""
     global _order_executor
     _order_executor = executor
-    print("[TRADER] ✓ OrderExecutor injected")
+    logging.info("[TRADER] ✓ OrderExecutor injected")
 
 
 def set_data_feed(data_feed):
     """Inject DataFeed for access to REAL positions"""
     global _data_feed
     _data_feed = data_feed
-    print("[TRADER] ✅ DataFeed injected (REAL position tracking)")
+    logging.info("[TRADER] ✅ DataFeed injected (REAL position tracking)")
 
 
 def save_market_metadata_to_disk():
@@ -57,9 +58,9 @@ def save_market_metadata_to_disk():
         with open(_METADATA_FILE, 'w') as f:
             json.dump(combined, f, indent=2)
         
-        # print(f"[TRADER] 💾 Saved metadata for {len(combined)} markets to disk")
+        # logging.info(f"[TRADER] 💾 Saved metadata for {len(combined)} markets to disk")
     except Exception as e:
-        print(f"[TRADER] ⚠️ Failed to save metadata: {e}")
+        logging.info(f"[TRADER] ⚠️ Failed to save metadata: {e}")
 
 
 def load_market_metadata_from_disk():
@@ -73,7 +74,7 @@ def load_market_metadata_from_disk():
     global _token_ids_cache, _market_metadata_cache
     
     if not _METADATA_FILE.exists():
-        print("[TRADER] ℹ️ No metadata file found (first run or clean start)")
+        logging.info("[TRADER] ℹ️ No metadata file found (first run or clean start)")
         return
     
     try:
@@ -87,9 +88,9 @@ def load_market_metadata_from_disk():
             if 'metadata' in data:
                 _market_metadata_cache[market_slug] = data['metadata']
         
-        print(f"[TRADER] ✅ Loaded metadata for {len(combined)} markets from disk")
+        logging.info(f"[TRADER] ✅ Loaded metadata for {len(combined)} markets from disk")
     except Exception as e:
-        print(f"[TRADER] ⚠️ Failed to load metadata: {e}")
+        logging.info(f"[TRADER] ⚠️ Failed to load metadata: {e}")
 
 
 def set_token_ids(market_slug: str, up_token_id: str, down_token_id: str, 
@@ -150,7 +151,7 @@ class Trader:
         self.trades_file = self.log_dir / "trades.jsonl"
         self.session_file = self.log_dir / "session.json"
         
-        print(f"[TRADER] Initialized with ${capital:,.2f} capital")
+        logging.info(f"[TRADER] Initialized with ${capital:,.2f} capital")
         
         # Load previous trades to restore statistics
         self.load_previous_trades()
@@ -161,7 +162,7 @@ class Trader:
         This allows bot to continue from where it left off after restart
         """
         if not self.trades_file.exists():
-            print(f"[TRADER] No previous trades file found (this is OK for first run)")
+            logging.info(f"[TRADER] No previous trades file found (this is OK for first run)")
             return
         
         try:
@@ -179,7 +180,7 @@ class Trader:
                         
                         # Validate trade has required fields
                         if 'pnl' not in trade or 'market_slug' not in trade:
-                            print(f"[WARNING] Trade on line {line_num} missing required fields, skipping")
+                            logging.info(f"[WARNING] Trade on line {line_num} missing required fields, skipping")
                             corrupted_lines += 1
                             continue
                         
@@ -187,7 +188,7 @@ class Trader:
                         loaded_count += 1
                         
                     except json.JSONDecodeError as e:
-                        print(f"[WARNING] Corrupted JSON on line {line_num}: {e}")
+                        logging.info(f"[WARNING] Corrupted JSON on line {line_num}: {e}")
                         corrupted_lines += 1
                         continue
             
@@ -200,19 +201,19 @@ class Trader:
                 wins = sum(1 for t in self.closed_trades if t['pnl'] > 0)
                 win_rate = (wins / loaded_count * 100) if loaded_count > 0 else 0
                 
-                print(f"[TRADER] ✓ Loaded {loaded_count} previous trade(s)")
-                print(f"[TRADER]   Cumulative PnL: ${total_pnl:+,.2f}")
-                print(f"[TRADER]   Win Rate: {win_rate:.1f}% ({wins}/{loaded_count})")
-                print(f"[TRADER]   Current Capital: ${self.current_capital:,.2f}")
+                logging.info(f"[TRADER] ✓ Loaded {loaded_count} previous trade(s)")
+                logging.info(f"[TRADER]   Cumulative PnL: ${total_pnl:+,.2f}")
+                logging.info(f"[TRADER]   Win Rate: {win_rate:.1f}% ({wins}/{loaded_count})")
+                logging.info(f"[TRADER]   Current Capital: ${self.current_capital:,.2f}")
                 
                 if corrupted_lines > 0:
-                    print(f"[TRADER] ⚠ Skipped {corrupted_lines} corrupted line(s)")
+                    logging.info(f"[TRADER] ⚠ Skipped {corrupted_lines} corrupted line(s)")
             else:
-                print(f"[TRADER] No valid trades found in file")
+                logging.info(f"[TRADER] No valid trades found in file")
                 
         except Exception as e:
-            print(f"[TRADER] ⚠ Error loading previous trades: {e}")
-            print(f"[TRADER] Starting fresh with capital ${self.starting_capital:,.2f}")
+            logging.info(f"[TRADER] ⚠ Error loading previous trades: {e}")
+            logging.info(f"[TRADER] Starting fresh with capital ${self.starting_capital:,.2f}")
             # Reset to fresh state on error
             self.closed_trades = []
             self.current_capital = self.starting_capital
@@ -267,7 +268,7 @@ class Trader:
             ask_price = up_ask if side == 'UP' else down_ask
             
             if token_id and ask_price:
-                print(f"[TRADER] ▶ {side:4s} @ ${price:.3f}  {shares:6.1f} contracts = ${size_usd:6.2f}  ({market_slug})")
+                logging.info(f"[TRADER] ▶ {side:4s} @ ${price:.3f}  {shares:6.1f} contracts = ${size_usd:6.2f}  ({market_slug})")
                 
                 result = _order_executor.place_buy_order(
                     market_slug=market_slug,
@@ -283,17 +284,17 @@ class Trader:
                     actual_cost = result.total_spent_usd
                     
                     if actual_contracts != contracts:
-                        print(f"[TRADER] ⚠ FAK partial fill: {actual_contracts:.2f}/{contracts} contracts")
+                        logging.info(f"[TRADER] ⚠ FAK partial fill: {actual_contracts:.2f}/{contracts} contracts")
                     
-                    print(f"[TRADER] ✓ Order filled: {actual_contracts:.2f} contracts for ${actual_cost:.2f}")
+                    logging.info(f"[TRADER] ✓ Order filled: {actual_contracts:.2f} contracts for ${actual_cost:.2f}")
                     
                 elif not result.dry_run:
                     # ❌ FAILED! Don't create position at all!
-                    print(f"[TRADER] ❌ Order FAILED for {side}: {result.error} - position NOT created")
+                    logging.info(f"[TRADER] ❌ Order FAILED for {side}: {result.error} - position NOT created")
                     return False
         else:
             # DRY_RUN or no executor - just print
-            print(f"[TRADER] ▶ {side:4s} @ ${price:.3f}  {shares:6.1f} shares = ${size_usd:6.2f}  ({market_slug})")
+            logging.info(f"[TRADER] ▶ {side:4s} @ ${price:.3f}  {shares:6.1f} shares = ${size_usd:6.2f}  ({market_slug})")
         
         # NOW create position with ACTUAL values (or paper values if DRY_RUN)
         if market_slug not in self.positions:
@@ -352,7 +353,7 @@ class Trader:
                 )
             except Exception as e:
                 # Don't fail the trade if logging fails
-                print(f"[WARNING] Detailed logging failed: {e}")
+                logging.info(f"[WARNING] Detailed logging failed: {e}")
         
         return True
     
@@ -419,9 +420,9 @@ class Trader:
         if total_shares > 0 and self._entry_count % 5 == 1:
             up_ratio = (up_shares / total_shares) * 100
             down_ratio = (down_shares / total_shares) * 100
-            print(f"[TRADER] After entry: UP {up_shares:.1f} ({up_ratio:.1f}%) | DOWN {down_shares:.1f} ({down_ratio:.1f}%)")
+            logging.info(f"[TRADER] After entry: UP {up_shares:.1f} ({up_ratio:.1f}%) | DOWN {down_shares:.1f} ({down_ratio:.1f}%)")
         
-        print(f"[TRADER] ▶ {side:4s} @ ${price:.3f}  {shares:6.1f} shares = ${size_usd:6.2f}  ({market_slug})")
+        logging.info(f"[TRADER] ▶ {side:4s} @ ${price:.3f}  {shares:6.1f} shares = ${size_usd:6.2f}  ({market_slug})")
         
         return True
     
@@ -514,13 +515,13 @@ class Trader:
         except Exception as e:
             # CRITICAL: If logging failed, DO NOT delete position!
             # Position will remain open and can be closed again
-            print(f"[TRADER] ⚠️ FAILED TO CLOSE MARKET {market_slug}: {e}")
-            print(f"[TRADER] ⚠️ Position kept open for retry!")
+            logging.info(f"[TRADER] ⚠️ FAILED TO CLOSE MARKET {market_slug}: {e}")
+            logging.info(f"[TRADER] ⚠️ Position kept open for retry!")
             return None
         
         # Print result
         status = "✓" if pnl > 0 else "✗"
-        print(f"[TRADER] {status} CLOSED {market_slug}: {pnl:+.2f} ({roi_pct:+.1f}%) | "
+        logging.info(f"[TRADER] {status} CLOSED {market_slug}: {pnl:+.2f} ({roi_pct:+.1f}%) | "
               f"{trade['total_entries']} entries, ${total_cost:.0f} invested, {winner_ratio:.1f}% {winner}")
         
         # ═══════════════════════════════════════════════════════════
@@ -531,7 +532,7 @@ class Trader:
             if order_executor and hasattr(order_executor, 'safety'):
                 order_executor.safety.reset_market(market_slug)
         except Exception as reset_err:
-            print(f"[TRADER] ⚠ Failed to reset market tracking: {reset_err}")
+            logging.info(f"[TRADER] ⚠ Failed to reset market tracking: {reset_err}")
         
         return trade
     
@@ -611,7 +612,7 @@ class Trader:
                     )
                     self._log_exit_orderbook(self._last_orderbook_snapshot)
                 except Exception as e:
-                    print(f"[TRADER] ⚠ Failed to log orderbook: {e}")
+                    logging.info(f"[TRADER] ⚠ Failed to log orderbook: {e}")
                     self._last_orderbook_snapshot = None
             
             # Create trade record
@@ -665,13 +666,13 @@ class Trader:
             except Exception as e:
                 # CRITICAL: If logging failed, DO NOT delete position!
                 # Position will remain open and can be closed again
-                print(f"[TRADER] ⚠️ FAILED TO CLOSE MARKET {market_slug}: {e}")
-                print(f"[TRADER] ⚠️ Position kept open for retry!")
+                logging.info(f"[TRADER] ⚠️ FAILED TO CLOSE MARKET {market_slug}: {e}")
+                logging.info(f"[TRADER] ⚠️ Position kept open for retry!")
                 return None
             
             # Print result
             status = "🚨" if pnl < 0 else "✓"
-            print(f"[TRADER] {status} EARLY EXIT {market_slug} @ ${exit_price:.2f}: {pnl:+.2f} ({roi_pct:+.1f}%) | "
+            logging.info(f"[TRADER] {status} EARLY EXIT {market_slug} @ ${exit_price:.2f}: {pnl:+.2f} ({roi_pct:+.1f}%) | "
                   f"{trade['total_entries']} entries, ${total_cost:.0f} invested")
             
             # 🔥 REAL SELL (if executor connected)
@@ -711,7 +712,7 @@ class Trader:
                         real_payout += result.total_spent_usd
                         real_sells_executed = True
                     elif not result.dry_run:
-                        print(f"[TRADER] ⚠ Failed to sell {side}: {result.error}")
+                        logging.info(f"[TRADER] ⚠ Failed to sell {side}: {result.error}")
                 
                 # ═══════════════════════════════════════════════════════════
                 # 📊 SLIPPAGE ANALYSIS: Expected vs Actual
@@ -733,29 +734,29 @@ class Trader:
                             price_diff = actual_avg_price - expected_price
                             price_diff_pct = (price_diff / expected_price * 100) if expected_price > 0 else 0
                             
-                            print(f"\n{'='*80}")
-                            print(f"[SLIPPAGE ANALYSIS] {self.coin.upper()} - {exit_reason}")
-                            print(f"{'='*80}")
-                            print(f"📊 EXPECTED (based on BID at trigger):")
-                            print(f"   Best BID price: ${expected_price:.4f}")
-                            print(f"   Expected payout: ${expected_payout:.2f}")
-                            print(f"   Expected PnL: ${pnl:.2f}")
-                            print(f"")
-                            print(f"💰 ACTUAL (from API response):")
-                            print(f"   Avg fill price: ${actual_avg_price:.4f}")
-                            print(f"   Actual payout: ${real_payout:.2f}")
-                            print(f"   Actual PnL: ${real_pnl:.2f}")
-                            print(f"")
-                            print(f"📉 SLIPPAGE:")
-                            print(f"   Payout difference: ${slippage_usd:+.2f} ({slippage_pct:+.1f}%)")
-                            print(f"   Price difference: ${price_diff:+.4f} ({price_diff_pct:+.1f}%)")
+                            logging.info(f"\n{'='*80}")
+                            logging.info(f"[SLIPPAGE ANALYSIS] {self.coin.upper()} - {exit_reason}")
+                            logging.info(f"{'='*80}")
+                            logging.info(f"📊 EXPECTED (based on BID at trigger):")
+                            logging.info(f"   Best BID price: ${expected_price:.4f}")
+                            logging.info(f"   Expected payout: ${expected_payout:.2f}")
+                            logging.info(f"   Expected PnL: ${pnl:.2f}")
+                            logging.info(f"")
+                            logging.info(f"💰 ACTUAL (from API response):")
+                            logging.info(f"   Avg fill price: ${actual_avg_price:.4f}")
+                            logging.info(f"   Actual payout: ${real_payout:.2f}")
+                            logging.info(f"   Actual PnL: ${real_pnl:.2f}")
+                            logging.info(f"")
+                            logging.info(f"📉 SLIPPAGE:")
+                            logging.info(f"   Payout difference: ${slippage_usd:+.2f} ({slippage_pct:+.1f}%)")
+                            logging.info(f"   Price difference: ${price_diff:+.4f} ({price_diff_pct:+.1f}%)")
                             
                             if slippage_usd < -1.0:
-                                print(f"   ⚠️ NEGATIVE SLIPPAGE > $1 - investigating...")
+                                logging.info(f"   ⚠️ NEGATIVE SLIPPAGE > $1 - investigating...")
                             elif abs(slippage_usd) < 0.5:
-                                print(f"   ✅ Minimal slippage")
+                                logging.info(f"   ✅ Minimal slippage")
                             
-                            print(f"{'='*80}\n")
+                            logging.info(f"{'='*80}\n")
                             
                             # Add to snapshot for logging
                             snapshot['actual_sale'] = {
@@ -772,7 +773,7 @@ class Trader:
                             self._log_exit_orderbook(snapshot)
                             
                     except Exception as e:
-                        print(f"[TRADER] ⚠ Slippage analysis error: {e}")
+                        logging.info(f"[TRADER] ⚠ Slippage analysis error: {e}")
                 
                 # ═══════════════════════════════════════════════════════════
                 # 📊 UPDATE TRADE RECORD with real data
@@ -806,10 +807,10 @@ class Trader:
                     # Update capital with real PnL (instead of estimated)
                     self.current_capital = self.current_capital - pnl + real_pnl
                     
-                    print(f"[TRADER] 💰 Real payout: ${real_payout:.2f} (estimated: ${payout:.2f})")
+                    logging.info(f"[TRADER] 💰 Real payout: ${real_payout:.2f} (estimated: ${payout:.2f})")
                     if abs(real_pnl - pnl) > 0.5:
                         diff = real_pnl - pnl
-                        print(f"[TRADER] ⚠️  PnL correction: {diff:+.2f} (real: {real_pnl:+.2f} vs estimated: {pnl:+.2f})")
+                        logging.info(f"[TRADER] ⚠️  PnL correction: {diff:+.2f} (real: {real_pnl:+.2f} vs estimated: {pnl:+.2f})")
             
             # ═══════════════════════════════════════════════════════════
             # 🔥 CRITICAL: Reset investment tracking for this market!
@@ -819,7 +820,7 @@ class Trader:
                 if order_executor and hasattr(order_executor, 'safety'):
                     order_executor.safety.reset_market(market_slug)
             except Exception as reset_err:
-                print(f"[TRADER] ⚠ Failed to reset market tracking: {reset_err}")
+                logging.info(f"[TRADER] ⚠ Failed to reset market tracking: {reset_err}")
             
             return trade
     
@@ -919,30 +920,30 @@ class Trader:
             f.write(json.dumps(snapshot) + '\n')
         
         # Print summary to console
-        print(f"\n{'='*80}")
-        print(f"[EXIT ORDERBOOK] {snapshot['coin'].upper()} - {snapshot['exit_reason']}")
-        print(f"Market: {snapshot['market_slug']}")
-        print(f"Our side: {snapshot['position']['our_side']}")
-        print(f"Invested: ${snapshot['position']['total_invested']:.2f}")
-        print(f"Best bid (sell price): {snapshot['expected_sale']['best_bid_price']:.4f}")
-        print(f"Expected payout: ${snapshot['expected_sale']['expected_payout_usd']:.2f}")
-        print(f"Expected loss: ${snapshot['expected_sale']['expected_loss_usd']:.2f}")
-        print(f"UP: BID={snapshot['orderbook']['UP']['best_bid']:.4f} ASK={snapshot['orderbook']['UP']['best_ask']:.4f} SPREAD={snapshot['orderbook']['UP']['spread']:.4f}")
-        print(f"DOWN: BID={snapshot['orderbook']['DOWN']['best_bid']:.4f} ASK={snapshot['orderbook']['DOWN']['best_ask']:.4f} SPREAD={snapshot['orderbook']['DOWN']['spread']:.4f}")
+        logging.info(f"\n{'='*80}")
+        logging.info(f"[EXIT ORDERBOOK] {snapshot['coin'].upper()} - {snapshot['exit_reason']}")
+        logging.info(f"Market: {snapshot['market_slug']}")
+        logging.info(f"Our side: {snapshot['position']['our_side']}")
+        logging.info(f"Invested: ${snapshot['position']['total_invested']:.2f}")
+        logging.info(f"Best bid (sell price): {snapshot['expected_sale']['best_bid_price']:.4f}")
+        logging.info(f"Expected payout: ${snapshot['expected_sale']['expected_payout_usd']:.2f}")
+        logging.info(f"Expected loss: ${snapshot['expected_sale']['expected_loss_usd']:.2f}")
+        logging.info(f"UP: BID={snapshot['orderbook']['UP']['best_bid']:.4f} ASK={snapshot['orderbook']['UP']['best_ask']:.4f} SPREAD={snapshot['orderbook']['UP']['spread']:.4f}")
+        logging.info(f"DOWN: BID={snapshot['orderbook']['DOWN']['best_bid']:.4f} ASK={snapshot['orderbook']['DOWN']['best_ask']:.4f} SPREAD={snapshot['orderbook']['DOWN']['spread']:.4f}")
         
         # Print full orderbook of selling side
         our_side = snapshot['position']['our_side']
         if our_side:
-            print(f"\n{our_side} Orderbook (we're selling here):")
+            logging.info(f"\n{our_side} Orderbook (we're selling here):")
             ob = snapshot['orderbook'][our_side]
-            print(f"  Asks (top 1):")
+            logging.info(f"  Asks (top 1):")
             for level in ob['asks_top1']:
-                print(f"    ${level['price']:.4f} × {level['size']:.2f}")
-            print(f"  Bids (top 5):")
+                logging.info(f"    ${level['price']:.4f} × {level['size']:.2f}")
+            logging.info(f"  Bids (top 5):")
             for level in ob['bids_top5']:
-                print(f"    ${level['price']:.4f} × {level['size']:.2f}")
+                logging.info(f"    ${level['price']:.4f} × {level['size']:.2f}")
         
-        print(f"{'='*80}\n")
+        logging.info(f"{'='*80}\n")
     
     def get_market_stats(self, market_slug: str, up_current: float = 0.5, down_current: float = 0.5) -> Optional[Dict]:
         """
@@ -1130,11 +1131,11 @@ class Trader:
             # Check if our side price dropped too low
             if our_price <= flip_stop_price:
                 flip_stop_triggered = True
-                print(f"[FLIP-STOP] 🚨 {coin.upper()} {our_side} @ ${our_price:.4f} <= ${flip_stop_price:.4f} TRIGGERED!")
+                logging.info(f"[FLIP-STOP] 🚨 {coin.upper()} {our_side} @ ${our_price:.4f} <= ${flip_stop_price:.4f} TRIGGERED!")
             else:
                 # Log warning if price is getting close to flip-stop (within 25%)
                 if our_price < flip_stop_price * 1.25:
-                    print(f"[FLIP-STOP] ⚠️  {coin.upper()} {our_side} @ ${our_price:.4f} close to ${flip_stop_price:.4f}")
+                    logging.info(f"[FLIP-STOP] ⚠️  {coin.upper()} {our_side} @ ${our_price:.4f} close to ${flip_stop_price:.4f}")
         
         # Update drawdown with current unrealized PnL
         self.update_market_drawdown(market_slug, unrealized_pnl)
@@ -1187,20 +1188,20 @@ class Trader:
                 f.flush()  # Force write to disk immediately
                 
         except PermissionError as e:
-            print(f"[TRADER] ⚠️ PERMISSION ERROR logging trade: {e}")
-            print(f"[TRADER] ⚠️ Trade data: {trade}")
-            print(f"[TRADER] ⚠️ File: {self.trades_file}")
+            logging.info(f"[TRADER] ⚠️ PERMISSION ERROR logging trade: {e}")
+            logging.info(f"[TRADER] ⚠️ Trade data: {trade}")
+            logging.info(f"[TRADER] ⚠️ File: {self.trades_file}")
             raise  # Re-raise to prevent position deletion
             
         except OSError as e:
-            print(f"[TRADER] ⚠️ DISK ERROR logging trade: {e}")
-            print(f"[TRADER] ⚠️ Trade data: {trade}")
-            print(f"[TRADER] ⚠️ Check disk space: df -h")
+            logging.info(f"[TRADER] ⚠️ DISK ERROR logging trade: {e}")
+            logging.info(f"[TRADER] ⚠️ Trade data: {trade}")
+            logging.info(f"[TRADER] ⚠️ Check disk space: df -h")
             raise  # Re-raise to prevent position deletion
             
         except Exception as e:
-            print(f"[TRADER] ⚠️ UNKNOWN ERROR logging trade: {e}")
-            print(f"[TRADER] ⚠️ Trade data: {trade}")
+            logging.info(f"[TRADER] ⚠️ UNKNOWN ERROR logging trade: {e}")
+            logging.info(f"[TRADER] ⚠️ Trade data: {trade}")
             import traceback
             traceback.print_exc()
             raise  # Re-raise to prevent position deletion
@@ -1222,7 +1223,7 @@ class Trader:
                 json.dump(session, f, indent=2)
                 
         except Exception as e:
-            print(f"[TRADER] Error saving session: {e}")
+            logging.info(f"[TRADER] Error saving session: {e}")
     
     def log_entry_detailed(self, market_slug: str, side: str, contracts: int, 
                            price: float, up_ask: float, down_ask: float,

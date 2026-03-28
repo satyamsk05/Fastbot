@@ -509,7 +509,7 @@ def main():
     # Build components
     tg_bot   = get_bot()
     notifier = get_notifier()
-    dash     = Dashboard(width=160, coins=ACTIVE_COINS)
+    dash     = Dashboard(coins=ACTIVE_COINS)
     tg_bot.active_coins = ACTIVE_COINS
 
     # Start data feed
@@ -639,9 +639,19 @@ def main():
         }
     tg_bot.get_health = _health
 
+    # Custom log bridge to dashboard
+    class DashHandler(logging.Handler):
+        def emit(self, record):
+            try: dash.log(self.format(record))
+            except: pass
+    
+    dash_h = DashHandler()
+    dash_h.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(dash_h)
+
     # Signal handler
     def _shutdown(sig, frame):
-        print("\n[SYSTEM] Stopping...")
+        # We don't print here to avoid mess, dash.live handles cleanup
         _stop.set()
         data_feed.stop()
         try: os.remove(pid_file)
@@ -667,8 +677,12 @@ def main():
                                  "market_slug":st.get("market_slug","")}
                 with _plock:  ps = {c:_pending.get(c) for c in ACTIVE_COINS}
                 with _tlock:  tl = list(_tradelog)
+                
+                # Fetch candle history for each coin for the trend visualizer
+                ch = {c: hm.get_candle_history(c) for c in ACTIVE_COINS}
+                
                 dash.render(ms, {c:_mg.get_step(c) for c in ACTIVE_COINS},
-                            ps, tl, get_wallet_balance(), DRY_RUN)
+                            ps, tl, get_wallet_balance(), DRY_RUN, candle_history=ch)
             except Exception as e:
                 logging.error(f"[DASH] {e}")
             time.sleep(DASHBOARD_REFRESH)
@@ -688,34 +702,35 @@ def main():
     procs = {c: CoinProc(c) for c in ACTIVE_COINS}
 
     # Main loop with parallel coin processing
-    print("[SYSTEM] Running (parallel). Ctrl+C to stop.")
-    with ThreadPoolExecutor(max_workers=len(ACTIVE_COINS)) as executor:
-        while not _stop.is_set():
-            now = int(time.time())
-            if _paused.is_set():
+    with dash.live_context():
+        dash.log("System Running (parallel)")
+        with ThreadPoolExecutor(max_workers=len(ACTIVE_COINS)) as executor:
+            while not _stop.is_set():
+                now = int(time.time())
+                if _paused.is_set():
+                    time.sleep(1)
+                    continue
+
+                # Run p.tick(now) for all coins in parallel
+                sigs = []
+                futures = {executor.submit(p.tick, now): c for c, p in procs.items()}
+                
+                for f in futures:
+                    coin = futures[f]
+                    try:
+                        s = f.result()
+                        if s: sigs.append(s)
+                    except Exception as e:
+                        logging.error(f"[{coin}] Parallel tick error: {e}")
+                        dash.log_error(f"{coin}: {e}")
+
+                if sigs:
+                    try:
+                        _pick_and_place(sigs, notifier, data_feed)
+                    except Exception as e:
+                        logging.error(f"[PICK] {e}")
+
                 time.sleep(1)
-                continue
-
-            # Run p.tick(now) for all coins in parallel
-            sigs = []
-            futures = {executor.submit(p.tick, now): c for c, p in procs.items()}
-            
-            for f in futures:
-                coin = futures[f]
-                try:
-                    s = f.result()
-                    if s: sigs.append(s)
-                except Exception as e:
-                    logging.error(f"[{coin}] Parallel tick error: {e}")
-                    dash.log_error(f"{coin}: {e}")
-
-            if sigs:
-                try:
-                    _pick_and_place(sigs, notifier, data_feed)
-                except Exception as e:
-                    logging.error(f"[PICK] {e}")
-
-            time.sleep(1)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import logging
 """
 Position Tracker - SINGLE source of truth for positions!
 
@@ -54,7 +55,7 @@ class PositionTracker:
         self.asset_to_market = {}  # asset_id -> (market_slug, side_name)
         self.lock = Lock()
         
-        print("[TRACKER] ✅ Position Tracker initialized - REAL DATA ONLY!")
+        logging.info("[TRACKER] ✅ Position Tracker initialized - REAL DATA ONLY!")
     
     def register_market(self, market_slug: str, up_token_id: str, down_token_id: str):
         """
@@ -72,7 +73,7 @@ class PositionTracker:
                     'DOWN': {'contracts': 0.0, 'invested': 0.0, 'trades': []}
                 }
             
-            print(f"[TRACKER] 📋 Registered market: {market_slug}")
+            logging.info(f"[TRACKER] 📋 Registered market: {market_slug}")
     
     def on_order_event(self, order_data: dict):
         """
@@ -91,7 +92,7 @@ class PositionTracker:
                 # Save pending order
                 with self.lock:
                     self.pending_orders[order_id] = order_data
-                print(f"[TRACKER] 📝 Order placed: {order_id[:16]}...")
+                logging.info(f"[TRACKER] 📝 Order placed: {order_id[:16]}...")
             
             elif order_type == 'UPDATE':
                 # ✅ ORDER MATCHED! UPDATING POSITION WITH REAL DATA!
@@ -104,7 +105,7 @@ class PositionTracker:
                 # Find market by asset_id
                 market_info = self.asset_to_market.get(asset_id)
                 if not market_info:
-                    print(f"[TRACKER] ⚠ Unknown asset_id: {asset_id}")
+                    logging.info(f"[TRACKER] ⚠ Unknown asset_id: {asset_id}")
                     return
                 
                 market_slug, side_name = market_info
@@ -124,8 +125,8 @@ class PositionTracker:
                         pos['contracts'] += size_matched
                         pos['invested'] += (size_matched * price)
                         
-                        print(f"[TRACKER] ✅ BUY {side_name}: +{size_matched:.2f} @ ${price:.4f}")
-                        print(f"          Position now: {pos['contracts']:.2f} contracts, ${pos['invested']:.2f} invested")
+                        logging.info(f"[TRACKER] ✅ BUY {side_name}: +{size_matched:.2f} @ ${price:.4f}")
+                        logging.info(f"          Position now: {pos['contracts']:.2f} contracts, ${pos['invested']:.2f} invested")
                     
                     elif side == 'SELL':
                         # ✅ SELL - remove from position
@@ -133,18 +134,18 @@ class PositionTracker:
                         # DON'T touch invested on sell (for PnL calculation)
                         
                         received_usd = size_matched * price
-                        print(f"[TRACKER] ✅ SELL {side_name}: -{size_matched:.2f} @ ${price:.4f} = ${received_usd:.2f}")
-                        print(f"          Position now: {pos['contracts']:.2f} contracts")
+                        logging.info(f"[TRACKER] ✅ SELL {side_name}: -{size_matched:.2f} @ ${price:.4f} = ${received_usd:.2f}")
+                        logging.info(f"          Position now: {pos['contracts']:.2f} contracts")
             
             elif order_type == 'CANCELLATION':
                 # Order cancelled
                 with self.lock:
                     if order_id in self.pending_orders:
                         del self.pending_orders[order_id]
-                print(f"[TRACKER] ❌ Order cancelled: {order_id[:16]}...")
+                logging.info(f"[TRACKER] ❌ Order cancelled: {order_id[:16]}...")
         
         except Exception as e:
-            print(f"[TRACKER] ⚠ Error processing order event: {e}")
+            logging.info(f"[TRACKER] ⚠ Error processing order event: {e}")
     
     def on_trade_event(self, trade_data: dict):
         """
@@ -165,10 +166,10 @@ class PositionTracker:
             asset_id = trade_data.get('asset_id')
             
             if status == 'MATCHED':
-                print(f"[TRACKER] 🔄 Trade matched: {trade_id[:16]}... ({side} {size:.2f})")
+                logging.info(f"[TRACKER] 🔄 Trade matched: {trade_id[:16]}... ({side} {size:.2f})")
             
             elif status == 'MINED':
-                print(f"[TRACKER] ⛏️  Trade mined: {trade_id[:16]}...")
+                logging.info(f"[TRACKER] ⛏️  Trade mined: {trade_id[:16]}...")
             
             elif status == 'CONFIRMED':
                 # ✅ TRADE CONFIRMED ON-CHAIN!
@@ -193,14 +194,14 @@ class PositionTracker:
                         if market_slug in self.positions:
                             self.positions[market_slug][side_name]['trades'].append(trade_info)
                     
-                    print(f"[TRACKER] ✅ Trade CONFIRMED: {trade_id[:16]}...")
-                    print(f"          {side} {size:.2f} @ ${price:.4f} = ${size * price:.2f}")
+                    logging.info(f"[TRACKER] ✅ Trade CONFIRMED: {trade_id[:16]}...")
+                    logging.info(f"          {side} {size:.2f} @ ${price:.4f} = ${size * price:.2f}")
             
             elif status in ['RETRYING', 'FAILED']:
-                print(f"[TRACKER] ⚠️  Trade {status}: {trade_id[:16]}...")
+                logging.info(f"[TRACKER] ⚠️  Trade {status}: {trade_id[:16]}...")
         
         except Exception as e:
-            print(f"[TRACKER] ⚠ Error processing trade event: {e}")
+            logging.info(f"[TRACKER] ⚠ Error processing trade event: {e}")
     
     def get_position(self, market_slug: str, side: str) -> Dict:
         """
@@ -320,7 +321,7 @@ class PositionTracker:
         """Clear position (after market close)"""
         with self.lock:
             if market_slug in self.positions:
-                print(f"[TRACKER] 🧹 Clearing position for {market_slug}")
+                logging.info(f"[TRACKER] 🧹 Clearing position for {market_slug}")
                 del self.positions[market_slug]
     
     def get_all_positions(self) -> Dict:

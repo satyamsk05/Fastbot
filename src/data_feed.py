@@ -1,6 +1,7 @@
 """
 Multi-Market data feed: Polymarket orderbook for 4 coins
 """
+import logging
 import json
 import time
 import threading
@@ -140,22 +141,22 @@ class DataFeed:
             pm_thread = threading.Thread(target=self._polymarket_worker, args=(coin,), daemon=True)
             pm_thread.start()
             self.threads.append(pm_thread)
-            print(f"[DATA] Started Polymarket feed for {coin.upper()}")
+            logging.info(f"[DATA] Started Polymarket feed for {coin.upper()}")
         
         # ❌ USER CHANNEL DISABLED - WebSocket auth doesn't work
         # Using REST API takingAmount/makingAmount instead!
-        print(f"[DATA] ℹ️  Position tracking via REST API responses")
+        logging.info(f"[DATA] ℹ️  Position tracking via REST API responses")
         
         # Start watchdog to monitor for stalled connections
         watchdog_thread = threading.Thread(target=self._watchdog_worker, daemon=True)
         watchdog_thread.start()
         self.threads.append(watchdog_thread)
         
-        print("[DATA] All feeds started: 4 Polymarket orderbooks + Watchdog")
+        logging.info("[DATA] All feeds started: 4 Polymarket orderbooks + Watchdog")
     
     def stop(self):
         """Stop all data streams"""
-        print("[DATA] Stopping feeds...")
+        logging.info("[DATA] Stopping feeds...")
         self.stop_event.set()
         
         # Give threads time to cleanup
@@ -163,7 +164,7 @@ class DataFeed:
             if t.is_alive():
                 t.join(timeout=1)
         
-        print("[DATA] Feeds stopped")
+        logging.info("[DATA] Feeds stopped")
     
     def get_state(self, coin: str = 'btc') -> Dict:
         """Get current market state for specified coin (thread-safe)"""
@@ -223,7 +224,7 @@ class DataFeed:
                 current_time = int(time.time())
                 next_market = ((current_time // 900) + 1) * 900
                 wait_time = next_market - current_time
-                print(f"[PM-{coin.upper()}] Market {slug} not found (may not be open yet, next in {wait_time}s)")
+                logging.info(f"[PM-{coin.upper()}] Market {slug} not found (may not be open yet, next in {wait_time}s)")
                 return None
             
             # Get first market
@@ -251,7 +252,7 @@ class DataFeed:
             }
             
         except Exception as e:
-            print(f"[PM-{coin.upper()}] Error fetching tokens: {e}")
+            logging.info(f"[PM-{coin.upper()}] Error fetching tokens: {e}")
         return None
     
     def _polymarket_worker(self, coin: str):
@@ -304,7 +305,7 @@ class DataFeed:
                         self.markets[coin]['market_start_price'] = self.eth_price
                     # SOL/XRP: leave at 0.0 (no price feed needed)
             
-            print(f"[PM-{coin.upper()}] Connected to {market_slug}, reconnect in {reconnect_in}s")
+            logging.info(f"[PM-{coin.upper()}] Connected to {market_slug}, reconnect in {reconnect_in}s")
             
             # Connect WebSocket
             try:
@@ -314,8 +315,8 @@ class DataFeed:
                 ws = websocket.WebSocketApp(
                     ws_url,
                     on_message=lambda ws, msg: self._on_pm_message(msg, tokens, coin),
-                    on_error=lambda ws, err: print(f"[PM-{coin.upper()}] WS ERROR: {err}"),
-                    on_close=lambda ws, code, reason: print(f"[PM-{coin.upper()}] WS CLOSED: {code} / {reason}")
+                    on_error=lambda ws, err: logging.info(f"[PM-{coin.upper()}] WS ERROR: {err}"),
+                    on_close=lambda ws, code, reason: logging.info(f"[PM-{coin.upper()}] WS CLOSED: {code} / {reason}")
                 )
                 
                 ws_ref[0] = ws
@@ -354,7 +355,7 @@ class DataFeed:
                     break
                 
             except Exception as e:
-                print(f"[PM-{coin.upper()}] Error: {e}")
+                logging.info(f"[PM-{coin.upper()}] Error: {e}")
                 time.sleep(5)
     
     def _on_pm_message(self, message: str, tokens: Dict, coin: str):
@@ -517,7 +518,7 @@ class DataFeed:
                                 callback(coin, market_state)
                             except Exception as e:
                                 # Log but don't crash
-                                print(f"[CALLBACK ERROR] {coin}: {e}")
+                                logging.info(f"[CALLBACK ERROR] {coin}: {e}")
                                 import traceback
                                 traceback.print_exc()
                         
@@ -528,7 +529,7 @@ class DataFeed:
                             name=f"cb_{coin}_{int(time.time()*1000)}"
                         ).start()
                     except Exception as e:
-                        print(f"[CALLBACK ERROR] Failed to start callback for {coin}: {e}")
+                        logging.info(f"[CALLBACK ERROR] Failed to start callback for {coin}: {e}")
                 
         except Exception as e:
             pass  # Ignore parsing errors
@@ -555,7 +556,7 @@ class DataFeed:
                     last_msg = self.markets[coin].get('last_msg_time', 0.0)
                     # Don't stall if we just started (wait at least STALL_THRESHOLD)
                     if last_msg > 0 and (now - last_msg > STALL_THRESHOLD):
-                        print(f"[WATCHDOG] 🚨 Data stall on {coin.upper()}! (No msg for {int(now-last_msg)}s). Reconnecting...")
+                        logging.info(f"[WATCHDOG] 🚨 Data stall on {coin.upper()}! (No msg for {int(now-last_msg)}s). Reconnecting...")
                         # Reset timestamp to avoid double-triggers
                         self.markets[coin]['last_msg_time'] = now
                         ws = self.markets[coin].get('ws')
@@ -582,13 +583,13 @@ class DataFeed:
             try:
                 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
                 
-                print("[USER-WS] 🔌 Connecting to User Channel...")
+                logging.info("[USER-WS] 🔌 Connecting to User Channel...")
                 
                 ws = websocket.WebSocketApp(
                     ws_url,
                     on_message=lambda ws, msg: self._on_user_message(msg),
-                    on_error=lambda ws, err: print(f"[USER-WS] ❌ Error: {err}") if err else None,
-                    on_close=lambda ws, code, reason: print(f"[USER-WS] 🔌 Disconnected (code={code})")
+                    on_error=lambda ws, err: logging.info(f"[USER-WS] ❌ Error: {err}") if err else None,
+                    on_close=lambda ws, code, reason: logging.info(f"[USER-WS] 🔌 Disconnected (code={code})")
                 )
                 
                 def on_open(ws):
@@ -614,9 +615,9 @@ class DataFeed:
                             "type": "user"
                         }
                         ws.send(json.dumps(sub_msg))
-                        print("[USER-WS] ✅ Authenticated & subscribed to user channel")
+                        logging.info("[USER-WS] ✅ Authenticated & subscribed to user channel")
                     except Exception as e:
-                        print(f"[USER-WS] ⚠️  Auth failed: {e}")
+                        logging.info(f"[USER-WS] ⚠️  Auth failed: {e}")
                 
                 ws.on_open = on_open
                 
@@ -624,11 +625,11 @@ class DataFeed:
                 ws.run_forever()
                 
             except Exception as e:
-                print(f"[USER-WS] ⚠️  Exception: {e}")
+                logging.info(f"[USER-WS] ⚠️  Exception: {e}")
             
             # Reconnect delay
             if not self.stop_event.is_set():
-                print(f"[USER-WS] ⏳ Reconnecting in {reconnect_delay}s...")
+                logging.info(f"[USER-WS] ⏳ Reconnecting in {reconnect_delay}s...")
                 time.sleep(reconnect_delay)
     
     def _on_user_message(self, message: str):
@@ -661,4 +662,4 @@ class DataFeed:
             # Not JSON message (e.g., connection established)
             pass
         except Exception as e:
-            print(f"[USER-WS] ⚠️  Parse error: {e}")
+            logging.info(f"[USER-WS] ⚠️  Parse error: {e}")
