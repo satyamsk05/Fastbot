@@ -518,9 +518,7 @@ class DataFeed:
                                 callback(coin, market_state)
                             except Exception as e:
                                 # Log but don't crash
-                                logger.info(f"[CALLBACK ERROR] {coin}: {e}")
-                                import traceback
-                                traceback.print_exc()
+                                logger.error(f"[CALLBACK ERROR] {coin}: {e}", exc_info=True)
                         
                         # 🛡️ Start in separate thread (doesn't block other coins)
                         threading.Thread(

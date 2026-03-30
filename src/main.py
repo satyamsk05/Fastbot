@@ -717,8 +717,11 @@ def main():
     # Custom log bridge to dashboard
     class DashHandler(logging.Handler):
         def emit(self, record):
-            try: dash.log(self.format(record))
-            except: pass
+            try:
+                msg = self.format(record)
+                dash.log(msg)
+            except Exception:
+                pass
     
     dash_h = DashHandler()
     dash_h.setFormatter(logging.Formatter("%(message)s"))
