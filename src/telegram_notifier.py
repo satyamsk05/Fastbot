@@ -54,7 +54,7 @@ class TelegramNotifier:
     # ── send helpers ─────────────────────────────────────────────────────────
     def send(self, text: str, parse_mode: str = "Markdown"):
         if not TELEGRAM_AVAILABLE or not BOT_TOKEN or not CHAT_ID:
-            print(f"[TG] {text}")
+            logger.info(f"[TG] {text}")
             return
         try:
             async def _do():

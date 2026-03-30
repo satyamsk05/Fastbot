@@ -50,7 +50,7 @@ class Dashboard:
 
     def live_context(self):
         """Returns the Live context manager for use in 'with' blocks."""
-        self._live = Live(None, console=self.console, refresh_per_second=4, screen=False)
+        self._live = Live(None, console=self.console, refresh_per_second=4, screen=True)
         return self._live
 
     def render(self, market_states: Dict, mg_steps: Dict,
