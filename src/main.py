@@ -88,6 +88,7 @@ def get_coin_logger(coin: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 _stop    = threading.Event()
 _paused  = threading.Event()    # set = bot is paused
+_start_time = time.time()       # bot startup timestamp
 
 _strat   = StreakReversalStrategy()
 _mg      = _strat.martingale
@@ -318,17 +319,27 @@ class CoinProc:
         self.warmup += 1
         logging.info(f"[{coin}] Boundary {boundary}")
 
-        # 1. Resolve pending
+        # 1. Resolve ANY pending bet (not just exact ts match)
         with _plock:
             pend = _pending.get(coin)
-        if pend and pend.get("ts") == closed_ts:
-            self._resolve(pend, closed_ts)
+        if pend:
+            pend_ts = pend.get("ts", 0)
+            if pend_ts <= closed_ts:
+                # Resolve using the ORIGINAL market ts from when bet was placed
+                self._resolve(pend, pend_ts)
+            # else: bet is for a future market, skip
 
         # 2. Fetch close & store candle (ALWAYS, even during warmup)
+        #    Try API first, fallback to stored token from pending
+        cp = None
         tkns = _tokens(coin, closed_ts)
-        cp   = None
         if tkns:
             cp = _price(tkns["yes_token"])
+        
+        # Fallback: if pending had this ts, use its yes_token for price
+        if cp is None and pend and pend.get("ts") == closed_ts:
+            cp = _price(pend["yes_token"])
+        
         if cp is not None:
             logging.info(f"[{coin}] Close: {cp:.4f}")
             hm.push_candle(coin, closed_ts, cp)
@@ -362,16 +373,61 @@ class CoinProc:
         return sig
 
     def _resolve(self, pend: Dict, closed_ts: int):
-        coin      = self.coin
-        direction = pend["direction"]
-        amount    = pend["amount"]
+        coin       = self.coin
+        direction  = pend["direction"]
+        amount     = pend["amount"]
+        entry_price = pend["price"]  # ← FIX: was undefined 'entry_price'
 
-        tkns = _tokens(coin, closed_ts)
-        cp   = _price(tkns["yes_token"]) if tkns else None
+        # ── FIX: Use stored token IDs instead of re-fetching from API ──
+        # After a market closes, the API may not return data anymore.
+        # We already have the token IDs from when the bet was placed.
+        yes_token = pend.get("yes_token")
+        
+        cp = None
+        if yes_token:
+            cp = _price(yes_token)
+        
+        # Fallback: try fetching from API if stored token failed
+        if cp is None:
+            tkns = _tokens(coin, closed_ts)
+            if tkns:
+                cp = _price(tkns["yes_token"])
 
         if cp is None:
-            logging.warning(f"[{coin}] Resolve failed — no price")
+            # ── FIX: Don't leave zombie positions ──
+            # If we can't get price, force-resolve based on last known data
+            # Check if market is old enough that it MUST have settled
+            now = int(time.time())
+            age = now - closed_ts
+            if age > INTERVAL_SEC * 2:  # More than 2 intervals old = definitely settled
+                logging.warning(f"[{coin}] Force-resolving stale position (age={age}s) as LOSS")
+                won = False
+                payout = 0.0
+                fee = amount * 0.0024
+                pnl = -(amount + fee)
+                
+                _strat.on_result(coin, won)
+                hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
+                hm.close_position(coin)
+                hm.record_pnl(pnl)
+                hm.record_fee(fee)
+                get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
+                
+                with _tlock:
+                    _tradelog.append({"coin":coin, "direction":direction,
+                                     "amount":amount, "won":won, "pnl":round(pnl,2)})
+                    if len(_tradelog) > 50:
+                        _tradelog.pop(0)
+                with _plock:
+                    _pending[coin] = None
+            else:
+                logging.warning(f"[{coin}] Resolve failed — no price (age={age}s, will retry)")
+                # DON'T clear pending — the next tick will retry
+                # But reset processed_ts so next boundary also tries
             return
+
+        # ── Store candle for resolved market ──
+        hm.push_candle(coin, closed_ts, cp)
 
         won    = (cp > 0.5) if direction == "YES" else (cp < 0.5)
         payout = round(amount / entry_price, 4) if won else 0.0
@@ -392,13 +448,15 @@ class CoinProc:
         get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
 
         with _tlock:
-            _tradelog.append({"coin":coin,"direction":direction,
-                               "amount":amount,"won":won,"pnl":round(pnl,2)})
+            _tradelog.append({"coin":coin, "direction":direction,
+                               "amount":amount, "won":won, "pnl":round(pnl,2)})
             if len(_tradelog) > 50:
                 _tradelog.pop(0)
 
         with _plock:
             _pending[coin] = None
+
+        logging.info(f"[{coin}] ✅ Resolved: {'WIN' if won else 'LOSS'} | PnL: {pnl:.4f} | Payout: {payout:.4f}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL PICKER  (random, recovery priority)
@@ -424,7 +482,7 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
         return
 
     # Notify signal
-    notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
+    # notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
 
     # Already has pending?
     with _plock:
@@ -521,10 +579,8 @@ def main():
             }
         }
     })
-    data_feed.start()
-    print(f"[SYSTEM] Feeds started: {', '.join(ACTIVE_COINS)}")
-
-    # Wire telegram callbacks
+    # Wire telegram callbacks 
+    tg_bot.active_coins = ACTIVE_COINS
     tg_bot.get_balance = get_wallet_balance
     tg_bot.get_real_bal = get_real_balance
     tg_bot.get_in_bets = get_in_bets
@@ -544,68 +600,9 @@ def main():
     def _pause(paused: bool):
         if paused: _paused.set()
         else: _paused.clear()
+        logging.info(f"Bot {'Paused' if paused else 'Resumed'} via Telegram")
     tg_bot.on_stop = _pause
 
-    def _manual(coin: str, direction: str, amount: float) -> str:
-        """Place a manual bet on a specific coin in a specific direction."""
-        coin = coin.upper()
-        direction = direction.upper()   # YES or NO
-
-        if _paused.is_set():
-            return "⏸ Bot paused. /stop to resume."
-        if coin not in ACTIVE_COINS:
-            return f"⚠️ {coin} is not active."
-
-        with _plock:
-            if _pending.get(coin):
-                return f"⚠️ {coin} already has an open bet."
-
-        bal = get_wallet_balance()
-        if bal < amount:
-            return f"⚠️ Low balance: ${bal:.2f} (need ${amount:.0f})"
-
-        active_ts = (int(time.time()) // INTERVAL_SEC) * INTERVAL_SEC
-        tkns = _tokens(coin, active_ts)
-        if not tkns:
-            return f"⚠️ Cannot fetch {coin} market."
-
-        # ── FIXED: Fetch live price for manual bet ──
-        price = 0.50 # fallback
-        try:
-            st = data_feed.get_state(coin.lower())
-            if st:
-                price = st["up_ask"] if direction == "YES" else st["down_ask"]
-                if not price or price <= 0: price = 0.50
-        except Exception: pass
-
-        token_id = tkns["yes_token"] if direction == "YES" else tkns["no_token"]
-        step = _mg.get_step(coin)
-
-        # ── FIXED: Price bracket to avoid outliers ──
-        if step == 0:
-            price = max(0.35, min(price, 0.65))
-        else:
-            price = max(0.49, min(price, 0.54))
-
-        ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
-
-        if ok:
-            if DRY_RUN:
-                _vbal_write(_vbal_read() - amount)
-            hm.log_bet_placed(coin, direction, amount, price, ot, step, active_ts, token_id)
-            hm.open_position(coin, direction, amount, price, active_ts, token_id)
-            with _plock:
-                _pending[coin] = {
-                    "direction": direction, "amount": amount, "step": step,
-                    "ts": active_ts, "yes_token": tkns["yes_token"],
-                    "no_token": tkns["no_token"], "token_id": token_id, "price": price,
-                }
-            arrow = "⬆ UP" if direction == "YES" else "⬇ DOWN"
-            return f"✅ *Manual bet placed!*\n{coin}  {arrow}  ${amount:.0f}  @ {price:.3f} ({ot})"
-        return f"❌ Order failed for {coin}."
-    tg_bot.on_manual_bet = _manual
-
-    _start_time = time.time()
     def _health():
         up_sec = int(time.time() - _start_time)
         h, m = divmod(up_sec // 60, 60)
@@ -632,12 +629,73 @@ def main():
         return {
             "ok": not _stop.is_set(),
             "uptime": uptime,
-            "ws_connected": data_feed.is_alive() if hasattr(data_feed, "is_alive") else True,
+            "ws_connected": data_feed.is_alive() if hasattr(data_feed, 'is_alive') else True,
             "redeem_status": _redeem_status,
             "pol_balance": pol_bal,
             "log_size": log_sz
         }
     tg_bot.get_health = _health
+
+    def _manual(coin: str, direction: str, amount: float) -> str:
+        """Place a manual bet on a specific coin in a specific direction."""
+        coin = coin.upper()
+        direction = direction.upper()   # YES or NO (UP or DOWN)
+
+        if _paused.is_set():
+            return "⏸ Bot paused. /stop to resume."
+        if coin not in ACTIVE_COINS:
+            return f"⚠️ {coin} is not active."
+
+        with _plock:
+            if _pending.get(coin):
+                return f"⚠️ {coin} already has an open bet."
+
+        bal = get_wallet_balance()
+        if bal < amount:
+            return f"⚠️ Low balance: ${bal:.2f} (need ${amount:.0f})"
+
+        active_ts = (int(time.time()) // INTERVAL_SEC) * INTERVAL_SEC
+        tkns = _tokens(coin, active_ts)
+        if not tkns:
+            return f"⚠️ Cannot fetch {coin} market."
+
+        # ── Fetch live price for manual bet ──
+        price = 0.50 # fallback
+        try:
+            st = data_feed.get_state(coin.lower())
+            if st:
+                price = st["up_ask"] if direction == "YES" else st["down_ask"]
+                if not price or price <= 0: price = 0.50
+        except Exception: pass
+
+        token_id = tkns["yes_token"] if direction == "YES" else tkns["no_token"]
+        step = _mg.get_step(coin)
+
+        # ── Price bracket to avoid outliers ──
+        if step == 0:
+            price = max(0.35, min(price, 0.65))
+        else:
+            price = max(0.49, min(price, 0.54))
+
+        ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
+
+        if ok:
+            if DRY_RUN:
+                _vbal_write(_vbal_read() - amount)
+            hm.log_bet_placed(coin, direction, amount, price, ot, step, active_ts, token_id)
+            hm.open_position(coin, direction, amount, price, active_ts, token_id)
+            with _plock:
+                _pending[coin] = {
+                    "direction": direction, "amount": amount, "step": step,
+                    "ts": active_ts, "yes_token": tkns["yes_token"],
+                    "no_token": tkns["no_token"], "token_id": token_id, "price": price,
+                }
+            arrow = "UP 🟢" if direction == "YES" else "DOWN 🔴"
+            return f"✅ *Manual trade success!*\n{coin} {arrow} ${amount:.0f} @ {price:.3f}"
+        return f"❌ Order failed for {coin}."
+    tg_bot.on_manual_bet = _manual
+
+    # Health report flow removed
 
     # Custom log bridge to dashboard
     class DashHandler(logging.Handler):
@@ -678,11 +736,8 @@ def main():
                 with _plock:  ps = {c:_pending.get(c) for c in ACTIVE_COINS}
                 with _tlock:  tl = list(_tradelog)
                 
-                # Fetch candle history for each coin for the trend visualizer
-                ch = {c: hm.get_candle_history(c) for c in ACTIVE_COINS}
-                
                 dash.render(ms, {c:_mg.get_step(c) for c in ACTIVE_COINS},
-                            ps, tl, get_wallet_balance(), DRY_RUN, candle_history=ch)
+                            ps, tl, get_wallet_balance(), DRY_RUN)
             except Exception as e:
                 logging.error(f"[DASH] {e}")
             time.sleep(DASHBOARD_REFRESH)

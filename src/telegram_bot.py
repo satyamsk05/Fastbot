@@ -1,19 +1,16 @@
 """
-Telegram Bot
+Telegram Bot - Minimalist UI (Style 2)
 ══════════════════════════════════════════════════════
 Commands:
-  /start       → Bot status + menu
-  /history     → 7-day candle trend (🟩🟥) per coin
-  /live        → Live odds (UP/DOWN price) for all coins
-  /stop        → Pause bot trading
-  /balance     → Wallet balance (available, in bets, total)
-  /position    → Current open bets
-  /daily_pnl   → Last 7 days P&L
-
-Manual bets (type in chat):
-  $3   → Place $3 manual bet on best signal coin
-  $6   → Place $6 manual bet
-  (any amount with $ prefix)
+  🖥 Live      → /live (with inline refresh)
+  🏦 Wallet    → /balance
+  📦 Open      → /position
+  📜 Log       → /history
+  📈 Trend     → Visual Streak Analysis (Circles)
+  📊 PnL       → /daily_pnl
+  🩺 System    → /health
+  ⚡ Quick Bet  → /manual_bet (Interactive Inline Flow)
+  ⏹ Pause     → /stop (toggle)
 ══════════════════════════════════════════════════════
 """
 import os
@@ -21,10 +18,13 @@ import logging
 import asyncio
 import threading
 import time
+import random
+import string
+from datetime import datetime
 from typing import Optional, Callable, Dict
 
 try:
-    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+    from telegram import Bot, Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
     from telegram.ext import (Application, CommandHandler, MessageHandler,
                                CallbackQueryHandler, ContextTypes, filters)
     TELEGRAM_OK = True
@@ -43,26 +43,19 @@ def _box(title: str, lines: list) -> str:
     body = "\n".join(lines)
     return f"*{title}*\n{sep}\n{body}\n{sep}"
 
-
-def _divider() -> str:
-    return "━━━━━━━━━━━━━━━━━━━━"
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # BOT CLASS
 # ══════════════════════════════════════════════════════════════════════════════
 class TelegramBot:
-    """
-    Full async Telegram bot.
-    Runs in a background thread (separate event loop).
-    Main bot registers callbacks here for /stop and manual bets.
-    """
-
+    """Full async Telegram bot. Option 2 Minimalist style."""
     def __init__(self):
         self._loop:   Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._app     = None
         self._running = False
+        
+        # Unique session ID for each start
+        self.session_id = "#" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
 
         # Callbacks set by main.py
         self.get_live_state: Optional[Callable] = None    # () → {coin: {up_ask, down_ask, seconds_till_end}}
@@ -70,18 +63,16 @@ class TelegramBot:
         self.get_real_bal:   Optional[Callable] = None    # () → float (on-chain balance)
         self.get_in_bets:    Optional[Callable] = None    # () → float  (USDC locked in open bets)
         self.on_stop:        Optional[Callable] = None    # () → None   (pause trading)
-        self.on_manual_bet:  Optional[Callable] = None   # (amount) → str  (result message)
+        self.on_manual_bet:  Optional[Callable] = None   # (coin, dir, amount) → str  (result message)
         self.is_paused:      bool = False
         self.active_coins:   list = ["BTC", "ETH", "SOL", "XRP"]
-        self._custom_bet_pending = None   # {coin, direction} waiting for amount
         self.get_health:     Optional[Callable] = None    # () → dict
 
         if TELEGRAM_OK and BOT_TOKEN and CHAT_ID:
             self._start_thread()
         else:
-            logging.warning("[TG] Telegram not configured — notifications only mode")
+            logging.warning("[TG] Telegram not configured properly.")
 
-    # ── thread setup ──────────────────────────────────────────────────────────
     def _start_thread(self):
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, daemon=True, name="telegram")
@@ -95,18 +86,17 @@ class TelegramBot:
         self._app = Application.builder().token(BOT_TOKEN).build()
         app = self._app
 
-        # Register handlers
-        app.add_handler(CommandHandler("start",     self._cmd_start))
-        app.add_handler(CommandHandler("menu",      self._cmd_start))
-        app.add_handler(CommandHandler("history",   self._cmd_history))
-        app.add_handler(CommandHandler("live",      self._cmd_live))
-        app.add_handler(CommandHandler("stop",      self._cmd_stop))
-        app.add_handler(CommandHandler("balance",   self._cmd_balance))
-        app.add_handler(CommandHandler("position",  self._cmd_position))
+        # Handlers
+        app.add_handler(CommandHandler("start",   self._cmd_start))
+        app.add_handler(CommandHandler("menu",    self._cmd_start))
+        app.add_handler(CommandHandler("history", self._cmd_history))
+        app.add_handler(CommandHandler("live",    self._cmd_live))
+        app.add_handler(CommandHandler("stop",    self._cmd_stop))
+        app.add_handler(CommandHandler("balance", self._cmd_balance))
+        app.add_handler(CommandHandler("position", self._cmd_position))
         app.add_handler(CommandHandler("daily_pnl", self._cmd_daily_pnl))
-        app.add_handler(CommandHandler("trend",     self._cmd_trend))
-        app.add_handler(CommandHandler("health",    self._cmd_health))
-        app.add_handler(CommandHandler("hide",      self._cmd_hide))
+        app.add_handler(CommandHandler("health",  self._cmd_health))
+        app.add_handler(CommandHandler("trend",   self._cmd_trend))
         app.add_handler(CallbackQueryHandler(self._on_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
 
@@ -114,40 +104,14 @@ class TelegramBot:
         await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        logging.info("[TG] Bot polling started")
 
-        # ── Register /command menu in Telegram ────────────────────
-        try:
-            from telegram import BotCommand
-            await app.bot.set_my_commands([
-                BotCommand("start",     "🚀 Bot status + menu"),
-                BotCommand("menu",      "Show command buttons"),
-                BotCommand("live",      "📊 Live odds (UP/DOWN)"),
-                BotCommand("history",   "📈 Trade history"),
-                BotCommand("balance",   "💰 Wallet balance"),
-                BotCommand("position",  "📌 Open positions"),
-                BotCommand("daily_pnl", "📅 Last 7 days P&L"),
-                BotCommand("stop",      "⏸ Pause / Resume bot"),
-                BotCommand("trend",     "📉 10-candle history"),
-                BotCommand("health",    "🏥 System health status"),
-            ])
-            logging.info("[TG] ✅ Bot commands menu registered")
-        except Exception as e:
-            logging.warning(f"[TG] Could not set commands menu: {e}")
+        # Remove hamburger menu
+        try: await app.bot.delete_my_commands()
+        except: pass
 
-        # ── Send startup message with Reply Keyboard buttons ──────
-        try:
-            await app.bot.send_message(
-                chat_id=CHAT_ID,
-                text="⌨️ *Bot Controls Ready*\nUse buttons below 👇",
-                parse_mode="Markdown",
-                reply_markup=self._get_kb(),
-            )
-            logging.info("[TG] ✅ Reply keyboard sent")
-        except Exception as e:
-            logging.warning(f"[TG] Could not send keyboard: {e}")
+        # Keyboard is active via reply_markup on first command or persistent menu
+        pass
 
-        # Keep running
         while self._running:
             await asyncio.sleep(1)
 
@@ -155,546 +119,275 @@ class TelegramBot:
         await app.stop()
         await app.shutdown()
 
-    # ── send helper (thread-safe) ──────────────────────────────────────────────
     def send(self, text: str, parse_mode: str = "Markdown"):
-        if not TELEGRAM_OK or not BOT_TOKEN or not CHAT_ID:
-            print(f"[TG] {text}")
-            return
         if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self._send_async(text, parse_mode), self._loop
-            )
-        else:
-            print(f"[TG-OFFLINE] {text}")
+            asyncio.run_coroutine_threadsafe(self._send_async(text, parse_mode), self._loop)
 
     async def _send_async(self, text: str, parse_mode: str):
         try:
-            await self._app.bot.send_message(
-                chat_id=CHAT_ID, text=text, parse_mode=parse_mode
-            )
-        except Exception as e:
-            logging.error(f"[TG] send error: {e}")
+            await self._app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=parse_mode)
+        except: pass
 
-    # ── /start ─────────────────────────────────────────────────────────────────
-    async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        pause_status = "⏸ PAUSED" if self.is_paused else "▶ RUNNING"
-        coins_str = ", ".join(self.active_coins)
-        await update.message.reply_text(
-            _box("📊 BOT STATUS", [
-                f"STATUS   → {pause_status}",
-                f"COINS    → {coins_str}",
-                f"STRATEGY → 3-streak reversal",
-                f"LADDER   → $3 → $6 → $13 → $28 → $60",
-                "",
-                "Commands: /live /history /stop /balance /position /daily_pnl",
-            ]),
-            parse_mode="Markdown",
-            reply_markup=self._get_kb()
-        )
-
-    # ── keyboard helper ───────────
     def _get_kb(self):
+        """Minimalist Option 2 Keyboard."""
         from telegram import ReplyKeyboardMarkup, KeyboardButton
-        stop_label = "▶ Start" if self.is_paused else "⏸ Stop"
+        stop_label = "▶ Resume" if self.is_paused else "⏹ Pause"
         return ReplyKeyboardMarkup(
             [
-                [KeyboardButton("📊 Live"),    KeyboardButton("💰 Balance"), KeyboardButton("📌 Position")],
-                [KeyboardButton("📈 History"), KeyboardButton("📅 PnL"),     KeyboardButton("🏥 Health")],
-                [KeyboardButton("📉 Trend"),     KeyboardButton("🎯 Manual Bet"), KeyboardButton(stop_label)],
+                [KeyboardButton("🖥 Live"),    KeyboardButton("🏦 Wallet"), KeyboardButton("📦 Open")],
+                [KeyboardButton("📜 Log"),     KeyboardButton("📈 Trend"),  KeyboardButton("🩺 System")],
+                [KeyboardButton("⚡ Quick Bet"), KeyboardButton("📊 PnL"),    KeyboardButton(stop_label)],
             ],
             resize_keyboard=True,
-            is_persistent=True,
-            one_time_keyboard=False,
+            is_persistent=False,
+            one_time_keyboard=False
         )
 
-    # ── hide keyboard (obsolete, but keeping for safety) ───────────
-    async def _cmd_hide(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("⌨️ Re-sending menu...", reply_markup=self._get_kb())
+    # ── Command Handlers ───────────────────────────────────────────────────
 
-    # ── /history ───────────────────────────────────────────────────────────────
+    async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("👋 *Bot Started!* Minimalist dashboard active.", 
+                                        parse_mode="Markdown", reply_markup=self._get_kb())
+
     async def _cmd_history(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Show recent trade results."""
         bets = hm.get_bet_history(n=10)
         if not bets:
-            await update.message.reply_text("📊 *Trade History is empty.*", parse_mode="Markdown")
+            await update.message.reply_text("📊 *History is empty.*", parse_mode="Markdown", reply_markup=self._get_kb())
             return
-
         lines = []
         for b in reversed(bets):
             res = b.get("result", "OPEN")
-            pnl = b.get("pnl", 0.0)
+            pnl = b.get("pnl")
+            if pnl is None: pnl = 0.0
+            
             coin = b.get("coin", "???")
             amt = b.get("amount", 0.0)
-            
             icon = "🟢" if res == "WIN" else "🔴" if res == "LOSS" else "⏳"
             sign = "+" if pnl > 0 else ""
             res_str = f"{sign}${pnl:.2f}" if res != "OPEN" else "PENDING"
-            
-            lines.append(f"{icon} {coin} - ${amt:.0f} ({res_str})")
+            lines.append(f"{icon} *{coin}* - *${amt:.0f}* ({res_str})")
+        await update.message.reply_text(_box("📜 RECENT LOGS", lines), parse_mode="Markdown", reply_markup=self._get_kb())
 
-        await update.message.reply_text(_box("📊 RECENT TRADES", lines), parse_mode="Markdown")
-
-    # ── /live ──────────────────────────────────────────────────────────────────
     async def _cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        content = self._get_live_content()
-        if not content:
-            await update.message.reply_text("Live data not available yet.")
-            return
-
-        inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_live")]])
-        await update.message.reply_text(content, parse_mode="Markdown", reply_markup=inline_kb)
-
-    def _get_live_content(self) -> Optional[str]:
-        """Helper to generate the OG-style live price box string."""
         if not self.get_live_state:
-            return None
-
+            await update.message.reply_text("Live data unavailable.", reply_markup=self._get_kb())
+            return
         states = self.get_live_state()
         lines = []
-        timer_str = "00:00"
-        
+        rem_sec = 0
         for coin in self.active_coins:
-            ms = states.get(coin, {})
-            up  = ms.get("up_ask",  0.0)
-            dn  = ms.get("down_ask", 0.0)
-            sec = ms.get("seconds_till_end", 900)
-            
-            mins = sec // 60
-            secs = sec % 60
-            timer_str = f"{mins:02d}:{secs:02d}"
+            st = states.get(coin, {})
+            up = st.get("up_ask", 0.0)
+            dn = st.get("down_ask", 0.0)
+            rem_sec = st.get("seconds_till_end", 900)
             
             lines.append(f"🌟 *{coin}*")
-            lines.append(f"  🟢 YES: ${up:.2f}  |  🔴 NO: ${dn:.2f}")
-            lines.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+            lines.append(f"  🟢 *YES:* *${up:.2f}*  |  🔴 *NO:* *${dn:.2f}*")
+            lines.append("──────────────────────────")
+        
+        # Format timer
+        m, s = divmod(rem_sec, 60)
+        timer_str = f"⏰ *{m:02d}:{s:02d}*"
+        
+        header = "📈 LIVE PRICES"
+        body = "\n".join(lines[:-1]) # remove last separator
+        text = f"*{header}*\n──────────────────────────\n{body}\n{timer_str}"
+        
+        kb = [[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_live")]]
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
-        lines.append(f"⏰ {timer_str}")
-        return _box("📉 LIVE PRICES", lines)
-
-    # ── /stop ──────────────────────────────────────────────────────────────────
     async def _cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         self.is_paused = not self.is_paused
-        if self.on_stop:
-            self.on_stop(self.is_paused)
-        
-        status = "⏸ PAUSED — no new bets." if self.is_paused else "▶ RESUMED — active."
-        await update.message.reply_text(f"*Bot {status}*", 
-                                        parse_mode="Markdown",
-                                        reply_markup=self._get_kb())
+        if self.on_stop: self.on_stop(self.is_paused)
+        status = "⏹ *PAUSED* — news bets disabled" if self.is_paused else "▶ *RESUMED* — active"
+        await update.message.reply_text(f"*{status}*", parse_mode="Markdown", reply_markup=self._get_kb())
 
-    # ── /balance ───────────────────────────────────────────────────────────────
     async def _cmd_balance(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        avail   = self.get_balance() if self.get_balance else 0.0
-        real    = self.get_real_bal() if self.get_real_bal else 0.0
+        avail = self.get_balance() if self.get_balance else 0.0
+        real  = self.get_real_bal() if self.get_real_bal else 0.0
         in_bets = self.get_in_bets() if self.get_in_bets else 0.0
-        
         await update.message.reply_text(
-            _box("📊 WALLET BALANCE", [
-                f"VIRTUAL → ${avail:.2f} USDC",
-                f"In Bets → ${in_bets:.2f} USDC",
-                f"REAL    → ${real:.2f} USDC",
+            _box("🏦 WALLET STATUS", [
+                f"*Virtual Bal* → *${avail:.2f}*",
+                f"*In Bets*     → *${in_bets:.2f}*",
+                f"*Real Chain*  → *${real:.2f}*",
             ]),
-            parse_mode="Markdown"
+            parse_mode="Markdown", reply_markup=self._get_kb()
         )
 
-    # ── /position ──────────────────────────────────────────────────────────────
     async def _cmd_position(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         positions = hm.get_open_positions()
         if not positions:
-            await update.message.reply_text("📌 *No open positions.*", parse_mode="Markdown")
+            await update.message.reply_text("📌 *No open positions.*", parse_mode="Markdown", reply_markup=self._get_kb())
             return
-
         lines = []
-        total = 0.0
         for coin, pos in positions.items():
             arrow = "UP" if pos["direction"] == "YES" else "DOWN"
-            emoji = "🟢" if arrow == "UP" else "🔴"
-            lines.append(f"{emoji} {coin} → ${pos['amount']:.0f} @ {pos['price']:.3f} ({arrow})")
-            total += pos["amount"]
+            lines.append(f"📦 *{coin}* → *${pos['amount']:.0f}* @ *{pos['price']:.3f}* (*{arrow}*)")
+        await update.message.reply_text(_box("📦 OPEN POSITIONS", lines), parse_mode="Markdown", reply_markup=self._get_kb())
 
-        lines.append(f"TOTAL IN BETS → ${total:.2f}")
-
-        await update.message.reply_text(
-            _box("📌 OPEN POSITIONS", lines), parse_mode="Markdown"
-        )
-
-    # ── /daily_pnl ─────────────────────────────────────────────────────────────
     async def _cmd_daily_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         summary = hm.get_pnl_summary(days=7)
-        await update.message.reply_text(
-            f"*📅 Daily PNL (last 7 days)*\n\n{summary}",
-            parse_mode="Markdown"
-        )
+        # Summary helper in history_manager doesn't use bold values, I'll let it be for now or fix it locally
+        # Replacing for bold values
+        lines = []
+        for line in summary.split("\n"):
+            if "Net Total" in line: lines.append(line) # keep as is
+            elif "Mar:" in line:
+                # 🔴 30 Mar: $-10.02 (Fee: $0.02)
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    prefix = parts[0]
+                    suffix = parts[1].strip().split("(")
+                    val = suffix[0].strip()
+                    fee = suffix[1].replace(")","").strip() if len(suffix)>1 else ""
+                    lines.append(f"*{prefix}:* *{val}* (*{fee}*)")
+                else: lines.append(line)
+            else: lines.append(line)
+        
+        bold_summary = "\n".join(lines)
+        await update.message.reply_text(f"*📅 Daily PNL (7 days)*\n\n{bold_summary}", 
+                                        parse_mode="Markdown", reply_markup=self._get_kb())
 
-    # ── /health ────────────────────────────────────────────────────────────────
     async def _cmd_health(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self.get_health or not self.get_live_state:
-            await update.message.reply_text("Health data not available.")
+        if not self.get_health:
+            await update.message.reply_text("Health unavailable.", reply_markup=self._get_kb())
             return
-
         h = self.get_health()
-        states = self.get_live_state()
-        now = time.time()
-        
-        status = "🟢 OK" if h.get("ok") else "🔴 ERROR"
-        
         lines = [
-            f"*OVERALL*  → {status}",
-            f"*UPTIME*   → {h.get('uptime', '0h')}",
-            f"*REDEEM*   → {h.get('redeem_status', 'Idle')}",
-            f"*POL BAL*  → {h.get('pol_balance', 0.0):.2f} POL",
-            f"*LOG SIZE* → {h.get('log_size', '0 KB')}",
-            "──────────────────",
-            "📡 *DATA FEED STATUS:*"
+            f"*OVERALL*  → *{'🟢 OK' if h.get('ok') else '🔴 ERROR'}*",
+            f"*UPTIME*   → *{h.get('uptime', '0m')}*",
+            f"*POL WAL*  → *{h.get('pol_balance', 0.0):.2f} POL*",
+            f"*LOG SZ*   → *{h.get('log_size', '0 KB')}*",
         ]
-        
-        for coin in self.active_coins:
-            st = states.get(coin, {})
-            last_ms = st.get("last_msg_time", 0.0)
-            diff = int(now - last_ms) if last_ms > 0 else 999
-            
-            up_p = st.get("up_ask", 0.0)
-            dn_p = st.get("down_ask", 0.0)
-            
-            # Use new thresholds for UI
-            emoji = "🟢" if diff < 30 else "🟡" if diff < 60 else "🔴"
-            label = "OK" if diff < 30 else "LAG" if diff < 60 else "STALE"
-            
-            lines.append(f"{emoji} *{coin:<3}* [{label}] ({diff}s)")
-            lines.append(f"      📈 *{up_p:.3f}* | 📉 *{dn_p:.3f}*")
-            lines.append("      ┈┈┈┈┈┈┈┈┈┈")
-            
-        inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_health")]])
-        await update.message.reply_text(_box("🏥 SYSTEM HEALTH", lines), parse_mode="Markdown", reply_markup=inline_kb)
+        await update.message.reply_text(_box("🩺 SYSTEM HEALTH", lines), parse_mode="Markdown", reply_markup=self._get_kb())
 
     async def _cmd_trend(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Show clean trend summary for all coins."""
+        """Visual Streak Analysis using red/green circles."""
         lines = []
         for coin in self.active_coins:
             candles = hm.get_candle_history(coin, n=10)
+            # Create circles string
+            circles = []
+            ups = 0
+            downs = 0
+            # Pad with white circles if less than 10
+            pad_count = 10 - len(candles)
+            for _ in range(pad_count): circles.append("⚪")
             
-            # Create 10-box bar
-            emojis = []
-            for i in range(10):
-                # We want the last 10, but if we have fewer, we pad from the left
-                # Index calculation: if we have 2 candles, we want them at index 8 and 9
-                # So we pad 8 ⚪ at start.
-                idx = i - (10 - len(candles))
-                if idx >= 0:
-                    c = candles[idx]
-                    emojis.append("🟢" if c["dir"] == "UP" else "🔴")
+            for c in candles:
+                if c["dir"] == "UP":
+                    circles.append("🟢")
+                    ups += 1
                 else:
-                    emojis.append("⚪")
+                    circles.append("🔴")
+                    downs += 1
             
-            bar = "".join(emojis)
-            
-            # Counts from last 10
-            ups = sum(1 for c in candles if c["dir"] == "UP")
-            dns = len(candles) - ups
-            lines.append(f"*{coin}*  {bar} → UP:{ups} | DN:{dns}")
-            lines.append("") # Extra newline for spacing
-
-        lines.append("Trend → Streak Analysis Active")
-        await update.message.reply_text(
-            _box("📊  TREND DATA", lines), parse_mode="Markdown"
-        )
-
-    # ── hide keyboard ──────────────────────────────────────────────────────────
-    async def _cmd_hide(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        from telegram import ReplyKeyboardRemove
-        await update.message.reply_text(
-            "⌨️ Keyboard hidden. Type /menu to show it again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
-    # ── manual bet menu (Step 1: Pick Coin) ─────────────────────────────────
-    async def _cmd_manual_bet(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Entry point for Manual Bet flow."""
-        if self.is_paused:
-            await update.message.reply_text("⏸ Bot is paused. Resume with /stop first.")
-            return
+            circles_str = "".join(circles)
+            lines.append(f"*{coin:<4}* {circles_str} → *UP:{ups}* | *DN:{downs}*")
         
-        # Initialize default amount if not set
-        if "manual_amount" not in ctx.user_data:
-            ctx.user_data["manual_amount"] = 1.0
-            
-        await self._show_manual_trade_menu(update, ctx)
+        header = "📊 TREND DATA"
+        sep = "──────────────────────────"
+        body = "\n".join(lines)
+        footer = "Trend → Streak Analysis Active"
+        text = f"*{header}*\n{sep}\n{body}\n\n{footer}"
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=self._get_kb())
 
-    def _manual_header(self, coin: str = "BTC") -> str:
-        """User-requested header design for manual trade."""
-        now_ts = int(time.time())
-        t_str = time.strftime("%H:%M:%S")
-        
-        # Calculate 15m window
-        window_start = (now_ts // 900) * 900
-        window_end = window_start + 900
-        s_str = time.strftime("%-I:%M%p", time.localtime(window_start))
-        e_str = time.strftime("%-I:%M%p", time.localtime(window_end))
-        d_str = time.strftime("%B %d", time.localtime(window_start))
-        
-        return (
-            f"🎯 *MANUAL TRADE*\n"
-            f"──────────────────────────\n"
-            f"⏰ *Time:* {t_str}\n"
-            f"📍 *Market:* {coin} Up/Down\n"
-            f"📅 - {d_str}, {s_str}-{e_str} ET\n"
-            f"──────────────────────────\n"
-        )
-
-    def _get_betting_inline(self, sel_coin: str = None, sel_amount: float = None) -> InlineKeyboardMarkup:
-        """Sequential multi-step inline row builder with ✅ highlight on the LEFT."""
-        rows = []
-        
-        # Step 1: Coin Row
-        coins = ["BTC", "ETH", "SOL", "XRP"]
-        rows.append([
-            InlineKeyboardButton(f"✅ {c}" if c == sel_coin else c, callback_data=f"mcoin_{c}") 
-            for c in coins
-        ])
-        
-        # Step 2: Amount Row (only if coin selected)
-        if sel_coin:
-            amounts = [1, 2, 3, 5]
-            rows.append([
-                InlineKeyboardButton(f"✅ ${a}" if a == sel_amount else f"${a}", callback_data=f"mamt_{a}")
-                for a in amounts
-            ])
-            
-        # Step 3: Direction Row (only if coin AND amount selected)
-        if sel_coin and sel_amount:
-            rows.append([
-                InlineKeyboardButton("⬆️ UP (YES)", callback_data=f"mdir_{sel_coin}_YES"),
-                InlineKeyboardButton("⬇️ DOWN (NO)", callback_data=f"mdir_{sel_coin}_NO")
-            ])
-            
-        # Navigation / Back
-        rows.append([InlineKeyboardButton("🔙 Back to Coins", callback_data="mback_coins")])
-        
-        return InlineKeyboardMarkup(rows)
-
-    def _get_manual_text(self, step: int, coin: str = None, amount: float = None) -> str:
-        """Helper to build the cumulative beauty text."""
-        header = self._manual_header(coin or "BTC")
-        lines = [header]
-        
-        if step == 1:
-            lines.append("Step 1: 🪙 *Select Coin*")
-            lines.append("Choose a market to trade:")
-        
-        if step >= 2:
-            lines.append(f"Step 1: 🪙 *Coin* → {coin} ✅")
-            if step == 2:
-                lines.append("\nStep 2: 💰 *Select Amount*")
-                lines.append("Choose investment in USDC:")
-        
-        if step >= 3:
-            lines.append(f"Step 2: 💰 *Amount* → ${amount:.0f} ✅")
-            if step == 3:
-                # Add live price context for the selected coin
-                price_info = ""
-                if self.get_live_state:
-                    st = self.get_live_state().get(coin, {})
-                    up = st.get("up_ask", 0.0)
-                    dn = st.get("down_ask", 0.0)
-                    price_info = f"\n📊 *Market:* UP at ${up:.2f} | DOWN at ${dn:.2f}"
-                
-                lines.append(f"{price_info}\n")
-                lines.append("Step 3: 📈 *Select Direction*")
-                lines.append("Finalize your position:")
-            
-        return "\n".join(lines)
-
-    async def _show_manual_trade_menu(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        text = self._get_manual_text(step=1)
-        inline_kb = self._get_betting_inline()
-        
-        # ✅ FIX: Keep main menu buttons instead of hiding them
-        reply_kb = self._get_kb()
-        
-        if update.callback_query:
-            try:
-                await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=inline_kb)
-            except:
-                pass
-        else:
-            # Show the main menu at bottom to ensure no "duplicate" $1, $2 buttons
-            await update.message.reply_text("🎯 *Manual Trade Mode*", 
-                                           parse_mode="Markdown",
-                                           reply_markup=reply_kb)
-            
-            query_msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=inline_kb)
-            ctx.user_data["menu_msg_id"] = query_msg.message_id
-            # Reset selection state
-            ctx.user_data["manual_coin"] = None
-            ctx.user_data["manual_amount"] = None
-
-    # ── inline callback handler (multi-step) ──────────────────────────────
-    async def _on_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button taps for manual bet flow and refresh."""
-        query = update.callback_query
-        await query.answer()
-        data = query.data or ""
-
-        # ── Refresh Live Prices ──
-        if data == "refresh_live":
-            content = self._get_live_content()
-            if content:
-                inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_live")]])
-                try:
-                    await query.edit_message_text(content, parse_mode="Markdown", reply_markup=inline_kb)
-                except Exception:
-                    pass # ignore "message is not modified"
-            return
-
-        # ── Refresh Health Status ──
-        if data == "refresh_health":
-            if not self.get_health or not self.get_live_state:
-                return
-            h = self.get_health()
-            states = self.get_live_state()
-            now = time.time()
-            status = "🟢 OK" if h.get("ok") else "🔴 ERROR"
-            lines = [
-                f"*OVERALL*  → {status}",
-                f"*UPTIME*   → {h.get('uptime', '0h')}",
-                f"*REDEEM*   → {h.get('redeem_status', 'Idle')}",
-                f"*POL BAL*  → {h.get('pol_balance', 0.0):.2f} POL",
-                f"*LOG SIZE* → {h.get('log_size', '0 KB')}",
-                "──────────────────",
-                "📡 *DATA FEED STATUS:*"
-            ]
-            for coin in self.active_coins:
-                st = states.get(coin, {})
-                diff = int(now - st.get("last_msg_time", 0.0)) if st.get("last_msg_time") else 999
-                emoji = "🟢" if diff < 30 else "🟡" if diff < 60 else "🔴"
-                label = "OK" if diff < 30 else "LAG" if diff < 60 else "STALE"
-                lines.append(f"{emoji} *{coin:<3}* [{label}] ({diff}s)")
-                lines.append(f"      📈 *{st.get('up_ask',0):.3f}* | 📉 *{st.get('down_ask',0):.3f}*")
-                lines.append("      ┈┈┈┈┈┈┈┈┈┈")
-            
-            inline_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_health")]])
-            try:
-                await query.edit_message_text(_box("🏥 SYSTEM HEALTH", lines), parse_mode="Markdown", reply_markup=inline_kb)
-            except:
-                pass
-            return
-
-        # ── Step 1: Coin Selection ──────────────
-        if data.startswith("mcoin_"):
-            coin = data.replace("mcoin_", "")
-            ctx.user_data["manual_coin"] = coin
-            text = self._get_manual_text(step=2, coin=coin)
-            inline_kb = self._get_betting_inline(sel_coin=coin)
-            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=inline_kb)
-
-        # ── Step 2: Amount Selection ────────────
-        elif data.startswith("mamt_"):
-            amount = float(data.replace("mamt_", ""))
-            ctx.user_data["manual_amount"] = amount
-            coin = ctx.user_data.get("manual_coin", "BTC")
-            text = self._get_manual_text(step=3, coin=coin, amount=amount)
-            inline_kb = self._get_betting_inline(sel_coin=coin, sel_amount=amount)
-            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=inline_kb)
-
-        # ── Step 3: Direction Selection → Place Trade ──
-        elif data.startswith("mdir_"):
-            parts = data.replace("mdir_", "").split("_")
-            coin, direction = parts[0], parts[1]
-            amount = ctx.user_data.get("manual_amount", 1.0)
-            
-            if self.on_manual_bet:
-                result = self.on_manual_bet(coin, direction, amount)
-                # Final display
-                header = self._manual_header(coin)
-                text = (
-                    f"{header}\n"
-                    f"Step 1: 🪙 *Coin Select* → {coin} ✅\n"
-                    f"Step 2: 💰 *Amount*      → ${amount:.0f} ✅\n"
-                    f"Step 3: 📈 *Direction*   → {'⬆️ UP' if direction=='YES' else '⬇️ DOWN'} ✅\n\n"
-                    f"🚀 *Result:* {result}"
-                )
-                await query.edit_message_text(text, parse_mode="Markdown")
-                # ✅ Restore bottom menu after trade is placed
-                await self._app.bot.send_message(chat_id=CHAT_ID, text="🔄 *Menu Restored*", 
-                                                 parse_mode="Markdown", reply_markup=self._get_kb())
-            else:
-                await query.edit_message_text("⚠️ Bot not ready for manual trade.")
-
-        elif data == "mback_coins":
-            await self._show_manual_trade_menu(update, ctx)
-
-    # ── manual bet ($3, $6, etc.) + button handler ──────────────────────────
     async def _on_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text = (update.message.text or "").strip()
-
-        # ── Map Reply Keyboard button taps to commands ────────────
-        button_map = {
-            "📊 Live":       self._cmd_live,
-            "💰 Balance":    self._cmd_balance,
-            "📌 Position":   self._cmd_position,
-            "📈 History":    self._cmd_history,
-            "📅 PnL":       self._cmd_daily_pnl,
-            "⏸ Stop/Resume": self._cmd_stop,
-            "⏸ Stop":        self._cmd_stop,
-            "▶ Start":       self._cmd_stop,
-            "▶ Resume":      self._cmd_stop,
-            "📉 Trend":      self._cmd_trend,
-            "🎯 Manual Bet": self._cmd_manual_bet,
-            "🔄 Refresh":    self._cmd_start,
-            "🏥 Health":     self._cmd_health,
-            "⌨️ Hide":       self._cmd_hide,
-            "⌨️ Hide Menu":  self._cmd_hide,
+        btn_map = {
+            "🖥 Live":    self._cmd_live,
+            "🏦 Wallet":  self._cmd_balance,
+            "📦 Open":    self._cmd_position,
+            "📜 Log":     self._cmd_history,
+            "📈 Trend":   self._cmd_trend,
+            "📊 PnL":     self._cmd_daily_pnl,
+            "🩺 System":  self._cmd_health,
+            "⚡ Quick Bet": self._cmd_manual_bet,
+            "⏹ Pause":   self._cmd_stop,
+            "▶ Resume":  self._cmd_stop
         }
-        if text in button_map:
-            await button_map[text](update, ctx)
+        if text in btn_map:
+            await btn_map[text](update, ctx)
+
+    # ── Interactive Manual Bet Flow ───────────────────────────────────────
+
+    async def _cmd_manual_bet(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Step 1: Select Coin."""
+        kb = [
+            [InlineKeyboardButton(c, callback_data=f"mb:{c}") for c in self.active_coins]
+        ]
+        await update.message.reply_text(
+            "🎯 *Select Coin to Trade*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    async def _on_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        data = query.data.split(":")
+
+        if data[0] == "refresh_live":
+            await self._cmd_live(update, ctx)
             return
 
-        # ── Manual Bet Sub-Menu Handlers ─────────────────────────
-        if text == "🔙 Back":
-            # Return to main 3x3 menu
-            await update.message.reply_text("🔄 Returning to menu...", reply_markup=self._get_kb())
-            return await self._cmd_start(update, ctx)
+        if data[0] != "mb":
+            return
 
-        # ❌ REMOVED: Duplicate $1, $2, $3, $5 logic from _on_message 
-        # (Users should use the Inline buttons for clean multi-step flow)
+        # mb:COIN
+        if len(data) == 2:
+            coin = data[1]
+            kb = [
+                [
+                    InlineKeyboardButton("UP 🟢 (YES)", callback_data=f"mb:{coin}:YES"),
+                    InlineKeyboardButton("DOWN 🔴 (NO)", callback_data=f"mb:{coin}:NO")
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="mb:cancel")]
+            ]
+            await query.edit_message_text(
+                f"🔸 *Coin:* *{coin}*\n\n📈 *Select Direction*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
 
-        # ── Custom amount pending (user typed a number) ──────────
-        if hasattr(self, '_custom_bet_pending') and self._custom_bet_pending:
-            pending = self._custom_bet_pending
-            self._custom_bet_pending = None
-            try:
-                amount = float(text.replace("$", "").replace(",", "").strip())
-            except ValueError:
-                await update.message.reply_text("❌ Invalid number. Try again: `5` or `25`",
-                                                 parse_mode="Markdown")
-                return
-            if amount < 1:
-                await update.message.reply_text("❌ Minimum bet is $1.")
-                return
-            coin = pending["coin"]
-            direction = pending["direction"]
+        # mb:COIN:DIR
+        elif len(data) == 3:
+            coin, direction = data[1], data[2]
+            amounts = [1, 2, 3, 5]
+            kb = [
+                [InlineKeyboardButton(f"${a}", callback_data=f"mb:{coin}:{direction}:{a}") for a in amounts],
+                [InlineKeyboardButton("❌ Cancel", callback_data="mb:cancel")]
+            ]
+            arrow = "UP 🟢" if direction == "YES" else "DOWN 🔴"
+            await query.edit_message_text(
+                f"🔸 *Coin:* *{coin}*\n🔸 *Dir:* *{arrow}*\n\n💰 *Select Amount*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+
+        # mb:COIN:DIR:AMT
+        elif len(data) == 4:
+            coin, direction, amount = data[1], data[2], float(data[3])
+            arrow = "UP 🟢" if direction == "YES" else "DOWN 🔴"
+            
+            await query.edit_message_text(f"⏳ *Executing {coin} {arrow} trade for ${amount:.0f}...*", parse_mode="Markdown")
+            
             if self.on_manual_bet:
-                result = self.on_manual_bet(coin, direction, amount)
-                await update.message.reply_text(result, parse_mode="Markdown")
+                res = self.on_manual_bet(coin, direction, amount)
+                await query.edit_message_text(res, parse_mode="Markdown")
             else:
-                await update.message.reply_text("⚠️ Bot not ready.")
-            return
+                await query.edit_message_text("❌ *Error: Manual bet callback not wired.*")
 
-        # ── Direct $amount typing → open manual bet flow ─────────
-        if text.startswith("$"):
-            # Redirect to manual bet menu
-            await self._cmd_manual_bet(update, ctx)
-            return
+        elif data[1] == "cancel":
+            await query.edit_message_text("❌ *Trade Canceled.*", parse_mode="Markdown")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# NOTIFICATION SHORTCUTS  (called from main.py)
-# ══════════════════════════════════════════════════════════════════════════════
 class TelegramNotifier:
-    """
-    Thin wrapper that uses TelegramBot.send() for all alert messages.
-    Keeps notification format centralized.
-    """
-
+    """Standard notifier for alerts."""
     def __init__(self, bot: "TelegramBot"):
         self._bot = bot
 
@@ -702,81 +395,35 @@ class TelegramNotifier:
         self._bot.send(text)
 
     def notify_startup(self, coins: list, dry_run: bool):
-        mode = "~ DRY RUN ~" if dry_run else "LIVE"
-        self.send(_box("📊 BOT START", [
-            f"MODE   → {mode}",
-            f"COINS  → {', '.join(coins)}",
-            f"LADDER → $3 → $6 → $13 → $28 → $60",
-            f"SIGNAL → 3-streak reversal",
-        ]))
+        now = datetime.now().strftime("%H:%M:%S")
+        sid = self._bot.session_id
+        msg = (
+            f"⏱ *Started:* *{now} IST*\n"
+            f"🔢 *Session:* *{sid}*"
+        )
+        self.send(msg)
 
-    def notify_signal(self, coin: str, direction: str, amount: float,
-                      step: int, closes: list):
-        arrow   = "UP" if direction == "YES" else "DOWN"
-        emoji   = "🟢" if arrow == "UP" else "🔴"
-        
-        # ── Visual Streak Analysis ──
-        # If betting UP (YES), the previous streak was DOWN (red)
-        # If betting DOWN (NO), the previous streak was UP (green)
-        streak_emoji = "🔴🔴🔴" if direction == "YES" else "🟢🟢🟢"
-        
-        # ── Market Context ──
-        price_str = "???"
-        if self._bot.get_live_state:
-            st = self._bot.get_live_state().get(coin, {})
-            p = st.get("up_ask" if direction == "YES" else "down_ask", 0.0)
-            price_str = f"${p:.2f}"
-            
-        self.send(_box(f"🎯 SIGNAL ALERT: {coin}", [
-            f"SIDE   → {emoji} {arrow}",
-            f"BET    → ${amount:.0f} (L{step+1})",
-            f"STREAK → {streak_emoji}",
-            f"PRICE  → {price_str}",
-            f"CL_AVG → {sum(closes[-3:])/3:.3f}",
-        ]))
-
-    def notify_trade_placed(self, coin: str, direction: str, amount: float,
-                            price: float, order_type: str, step: int):
+    def notify_trade_placed(self, coin: str, direction: str, amount: float, price: float, order_type: str, step: int):
         arrow = "UP" if direction == "YES" else "DOWN"
-        emoji = "🟢" if arrow == "UP" else "🔴"
-        self.send(_box(f"✅ TRADE PLACED {coin}", [
-            f"SIDE   → {emoji} {arrow}",
-            f"AMOUNT → ${amount:.0f} (L{step+1})",
-            f"PRICE  → {price:.3f}",
-            f"TYPE   → {order_type}",
+        self.send(_box(f"✅ TRADE PLACED: {coin}", [
+            f"*Side:* *{arrow}*",
+            f"*Size:* *${amount:.0f}*",
+            f"*Price:* *{price:.3f}*"
         ]))
 
-    def notify_result(self, coin: str, direction: str, amount: float,
-                      won: bool, payout: float, next_step: int):
-        status = "✅ TRADE WON" if won else "❌ TRADE LOST"
-        pnl    = payout - amount if won else -amount
-        sign   = "+" if pnl >= 0 else ""
-        nxt    = "L1 (RESET)" if won else f"L{next_step+1} (RECOVERY)"
-        self.send(_box(f"{status} {coin}", [
-            f"RESULT → {sign}${pnl:.2f}",
-            f"NEXT   → {nxt}",
+    def notify_result(self, coin: str, direction: str, amount: float, won: bool, payout: float, next_step: int):
+        status = "✅ WIN" if won else "❌ LOSS"
+        pnl = payout - amount if won else -amount
+        self.send(_box(f"📊 RESULT: {coin}", [
+            f"*State:* *{status}*",
+            f"*PnL:*   *{'+' if pnl>=0 else ''}${pnl:.2f}*"
         ]))
 
-    def notify_insufficient_funds(self, coin: str, balance: float, need: float):
-        self.send(_box("⚠️ LOW FUNDS", [
-            f"COIN   → {coin}",
-            f"WALLET → ${balance:.2f}",
-            f"NEED   → ${need:.2f}",
-            f"ACTION → Signal skipped",
-        ]))
-
-    def notify_error(self, context: str, error: str):
-        self.send(f"🚨 *ERROR* `{context}`\n```{str(error)[:200]}```")
-
-
-# ── singleton ─────────────────────────────────────────────────────────────────
+# Singleton getters
 _bot_instance: Optional[TelegramBot] = None
-
 def get_bot() -> TelegramBot:
     global _bot_instance
-    if _bot_instance is None:
-        _bot_instance = TelegramBot()
+    if _bot_instance is None: _bot_instance = TelegramBot()
     return _bot_instance
-
 def get_notifier() -> TelegramNotifier:
     return TelegramNotifier(get_bot())

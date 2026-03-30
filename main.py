@@ -328,17 +328,24 @@ class CoinProc:
         self.warmup += 1
         self.log.info(f"Boundary {boundary}")
 
-        # 1. Resolve pending
+        # 1. Resolve ANY pending bet (not just exact ts match)
         with _plock:
             pend = _pending.get(coin)
-        if pend and pend.get("ts") == closed_ts:
-            self._resolve(pend, closed_ts)
+        if pend:
+            pend_ts = pend.get("ts", 0)
+            if pend_ts <= closed_ts:
+                self._resolve(pend, pend_ts)
 
         # 2. Fetch close & store candle (ALWAYS, even during warmup)
+        cp = None
         tkns = _tokens(coin, closed_ts)
-        cp   = None
         if tkns:
             cp = _price(tkns["yes_token"])
+        
+        # Fallback: if pending had this ts, use its yes_token for price
+        if cp is None and pend and pend.get("ts") == closed_ts:
+            cp = _price(pend["yes_token"])
+        
         if cp is not None:
             self.log.info(f"Close: {cp:.4f}")
             hm.push_candle(coin, closed_ts, cp)
@@ -348,7 +355,7 @@ class CoinProc:
         # 3. Warmup — feed candle to strategy but don't trade
         if self.warmup < 3:
             if cp is not None:
-                _strat.on_candle_close(coin, closed_ts, cp)  # build history, ignore signal
+                _strat.on_candle_close(coin, closed_ts, cp)
             self.log.info(f"Warmup {self.warmup}/3 (candle stored)")
             return None
 
@@ -372,22 +379,59 @@ class CoinProc:
         return sig
 
     def _resolve(self, pend: Dict, closed_ts: int):
-        coin      = self.coin
-        direction = pend["direction"]
-        amount    = pend["amount"]
+        coin       = self.coin
+        direction  = pend["direction"]
+        amount     = pend["amount"]
+        entry_price = pend["price"]
 
-        tkns = _tokens(coin, closed_ts)
-        cp   = _price(tkns["yes_token"]) if tkns else None
+        # Use stored token IDs instead of re-fetching from API
+        yes_token = pend.get("yes_token")
+        
+        cp = None
+        if yes_token:
+            cp = _price(yes_token)
+        
+        # Fallback: try API
+        if cp is None:
+            tkns = _tokens(coin, closed_ts)
+            if tkns:
+                cp = _price(tkns["yes_token"])
 
         if cp is None:
-            self.log.warning("Resolve failed — no price")
+            now = int(time.time())
+            age = now - closed_ts
+            if age > INTERVAL_SEC * 2:
+                self.log.warning(f"Force-resolving stale position (age={age}s) as LOSS")
+                won = False
+                payout = 0.0
+                fee = amount * 0.0024
+                pnl = -(amount + fee)
+                
+                _strat.on_result(coin, won)
+                hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
+                hm.close_position(coin)
+                hm.record_pnl(pnl)
+                hm.record_fee(fee)
+                get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
+                
+                with _tlock:
+                    _tradelog.append({"coin":coin, "direction":direction,
+                                     "amount":amount, "won":won, "pnl":round(pnl,2)})
+                    if len(_tradelog) > 50:
+                        _tradelog.pop(0)
+                with _plock:
+                    _pending[coin] = None
+            else:
+                self.log.warning(f"Resolve failed — no price (age={age}s, will retry)")
             return
 
+        # Store candle for resolved market
+        hm.push_candle(coin, closed_ts, cp)
+
         won    = (cp > 0.5) if direction == "YES" else (cp < 0.5)
-        # Binary option payout is 1 USDC per share if won.
-        payout = (amount / pend["price"]) if won else 0.0
+        payout = (amount / entry_price) if won else 0.0
         
-        # ── NET PnL Calculation (deducting 0.24% estimated fee) ──
+        # NET PnL Calculation
         fee    = (payout * 0.0024) if won else (amount * 0.0024)
         pnl    = (payout - amount - fee) if won else -(amount + fee)
 
@@ -400,16 +444,18 @@ class CoinProc:
         if DRY_RUN and won:
             _vbal_write(_vbal_read() + payout)
 
-        get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
+        # get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
 
         with _tlock:
-            _tradelog.append({"coin":coin,"direction":direction,
-                               "amount":amount,"won":won,"pnl":round(pnl,2)})
+            _tradelog.append({"coin":coin, "direction":direction,
+                               "amount":amount, "won":won, "pnl":round(pnl,2)})
             if len(_tradelog) > 50:
                 _tradelog.pop(0)
 
         with _plock:
             _pending[coin] = None
+
+        self.log.info(f"✅ Resolved: {'WIN' if won else 'LOSS'} | PnL: {pnl:.4f} | Payout: {payout:.4f}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL PICKER  (random, recovery priority)
@@ -435,7 +481,7 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
         return
 
     # Notify signal
-    notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
+    # notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
 
     # Already has pending?
     with _plock:
@@ -535,7 +581,8 @@ def main():
     data_feed.start()
     print(f"[SYSTEM] Feeds started: {', '.join(ACTIVE_COINS)}")
 
-    # Wire telegram callbacks
+    # Wire telegram callbacks 
+    tg_bot.active_coins = ACTIVE_COINS
     tg_bot.get_balance = get_wallet_balance
     tg_bot.get_real_bal = get_real_balance
     tg_bot.get_in_bets = get_in_bets
@@ -545,15 +592,16 @@ def main():
         for c in ACTIVE_COINS:
             st = data_feed.get_state(c.lower())
             if st:
-                out[c] = {"up_ask": st.get("up_ask",0),
-                           "down_ask": st.get("down_ask",0),
-                           "seconds_till_end": st.get("seconds_till_end",900)}
+                out[c] = {"up_ask": st.get("up_ask", 0),
+                           "down_ask": st.get("down_ask", 0),
+                           "seconds_till_end": st.get("seconds_till_end", 900)}
         return out
     tg_bot.get_live_state = _live
 
     def _pause(paused: bool):
         if paused: _paused.set()
         else: _paused.clear()
+        logging.info(f"Bot {'Paused' if paused else 'Resumed'} via Telegram")
     tg_bot.on_stop = _pause
 
     def _health():
@@ -592,7 +640,7 @@ def main():
     def _manual(coin: str, direction: str, amount: float) -> str:
         """Place a manual bet on a specific coin in a specific direction."""
         coin = coin.upper()
-        direction = direction.upper()   # YES or NO
+        direction = direction.upper()   # YES or NO (UP or DOWN)
 
         if _paused.is_set():
             return "⏸ Bot paused. /stop to resume."
@@ -612,7 +660,7 @@ def main():
         if not tkns:
             return f"⚠️ Cannot fetch {coin} market."
 
-        # ── FIXED: Fetch live price for manual bet ──
+        # ── Fetch live price for manual bet ──
         price = 0.50 # fallback
         try:
             st = data_feed.get_state(coin.lower())
@@ -624,7 +672,7 @@ def main():
         token_id = tkns["yes_token"] if direction == "YES" else tkns["no_token"]
         step = _mg.get_step(coin)
 
-        # ── FIXED: Price bracket to avoid outliers ──
+        # ── Price bracket to avoid outliers ──
         if step == 0:
             price = max(0.35, min(price, 0.65))
         else:
@@ -643,8 +691,8 @@ def main():
                     "ts": active_ts, "yes_token": tkns["yes_token"],
                     "no_token": tkns["no_token"], "token_id": token_id, "price": price,
                 }
-            arrow = "⬆ UP" if direction == "YES" else "⬇ DOWN"
-            return f"✅ *Manual bet placed!*\n{coin}  {arrow}  ${amount:.0f}  @ {price:.3f} ({ot})"
+            arrow = "UP 🟢" if direction == "YES" else "DOWN 🔴"
+            return f"✅ *Manual trade success!*\n{coin} {arrow} ${amount:.0f} @ {price:.3f}"
         return f"❌ Order failed for {coin}."
     tg_bot.on_manual_bet = _manual
 
