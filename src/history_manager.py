@@ -14,6 +14,8 @@ import time
 import threading
 from datetime import datetime, date
 from typing import Dict, List, Optional
+from utils.gsd_logger import get_gsd_logger
+logger = get_gsd_logger("HIST")
 
 HISTORY_DIR  = os.path.join(os.path.dirname(__file__), "..", "history")
 BET_FILE     = os.path.join(HISTORY_DIR, "bet_history.json")
@@ -61,7 +63,7 @@ def reset_on_startup():
     with _lock:
         _write(POSITION_FILE, {})
         _write(CANDLE_FILE,   {})
-    print("[HISTORY] Position and Candle history reset on startup (Bets preserved).")
+    logger.info("[HISTORY] Position and Candle history reset on startup (Bets preserved).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -254,6 +256,20 @@ def get_daily_pnl() -> Dict[str, float]:
     with _lock:
         data = _read(DAILY_PNL_FILE)
         return data if isinstance(data, dict) else {}
+
+def get_total_pnl() -> float:
+    data = get_daily_pnl()
+    total = 0.0
+    for val in data.values():
+        total += val.get("pnl", 0.0) if isinstance(val, dict) else float(val)
+    return round(total, 4)
+
+def get_total_fees() -> float:
+    data = get_daily_pnl()
+    total = 0.0
+    for val in data.values():
+        total += val.get("fee", 0.0) if isinstance(val, dict) else 0.0
+    return round(total, 4)
 
 
 def get_pnl_summary(days: int = 7) -> str:

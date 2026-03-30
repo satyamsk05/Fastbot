@@ -4,7 +4,8 @@ Handles all Telegram messages: trade alerts, status, commands.
 Based on 4coinsbot's telegram_notifier.py structure.
 """
 import os
-import logging
+from utils.gsd_logger import get_gsd_logger
+logger = get_gsd_logger("TG_NOTIFY")
 import asyncio
 import threading
 from typing import Optional
@@ -38,7 +39,7 @@ class TelegramNotifier:
         if TELEGRAM_AVAILABLE and BOT_TOKEN and CHAT_ID:
             self._start_thread()
         else:
-            logging.warning("[TG] Telegram not configured – running silently")
+            logger.warning("[TG] Telegram not configured – running silently")
 
     # ── background thread ────────────────────────────────────────────────────
     def _start_thread(self):
@@ -63,7 +64,7 @@ class TelegramNotifier:
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(_do(), self._loop)
         except Exception as e:
-            logging.error(f"[TG] send error: {e}")
+            logger.error(f"[TG] send error: {e}")
 
     # ── trade notifications ───────────────────────────────────────────────────
     def notify_signal(self, coin: str, direction: str, amount: float,

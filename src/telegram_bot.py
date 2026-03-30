@@ -14,7 +14,8 @@ Commands:
 ══════════════════════════════════════════════════════
 """
 import os
-import logging
+from utils.gsd_logger import get_gsd_logger
+logger = get_gsd_logger("TG_BOT")
 import asyncio
 import threading
 import time
@@ -71,7 +72,7 @@ class TelegramBot:
         if TELEGRAM_OK and BOT_TOKEN and CHAT_ID:
             self._start_thread()
         else:
-            logging.warning("[TG] Telegram not configured properly.")
+            logger.warning("[TG] Telegram not configured properly.")
 
     def _start_thread(self):
         self._loop = asyncio.new_event_loop()

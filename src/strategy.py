@@ -6,7 +6,8 @@ Bet Sequence: 3 → 6 → 13 → 28 → 60 USDC
 import json
 import os
 import time
-import logging
+from utils.gsd_logger import get_gsd_logger
+logger = get_gsd_logger("STRAT")
 from typing import Optional, Dict, List
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
@@ -83,16 +84,16 @@ class Martingale:
         return min(self._load(coin), len(BET_SEQUENCE) - 1)
 
     def win(self, coin: str):
-        logging.info(f"[{coin}] Martingale WIN → reset to step 0")
+        logger.info(f"[{coin}] Martingale WIN → reset to step 0")
         self._save(coin, 0)
 
     def lose(self, coin: str):
         step = self._load(coin)
         if step < len(BET_SEQUENCE) - 1:
             step += 1
-            logging.info(f"[{coin}] Martingale LOSS → step {step}")
+            logger.info(f"[{coin}] Martingale LOSS → step {step}")
         else:
-            logging.warning(f"[{coin}] Martingale MAX reached → reset to 0")
+            logger.warning(f"[{coin}] Martingale MAX reached → reset to 0")
             step = 0
         self._save(coin, step)
 

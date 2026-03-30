@@ -21,6 +21,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dotenv import load_dotenv
 
+from utils.gsd_logger import setup_gsd_logging, get_gsd_logger, stop_gsd_logging, log_audit
+from utils.metrics_manager import init_metrics, update_metric, increment_trade, set_health_state, stop_metrics
+
+# ── setup logging ─────────────────────────────────────────────────────────────
+# Initialize centralized, queue-based logging BEFORE other imports if possible
+setup_gsd_logging()
+logger = get_gsd_logger("SYS")
+
 load_dotenv()
 
 SRC_DIR = Path(__file__).parent
@@ -59,36 +67,19 @@ DASHBOARD_REFRESH = 1.0
 VBAL_START        = 500.0
 BET_MIN_FUNDS     = 3.0
 
-# ── dirs + logging ────────────────────────────────────────────────────────────
+# ── dirs ──────────────────────────────────────────────────────────────────────
 for d in ("logs","data","history"):
     os.makedirs(d, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("logs/bot.log")],
-)
-for lib in ("urllib3","requests","httpx","telegram","apscheduler"):
-    logging.getLogger(lib).setLevel(logging.WARNING)
-
 def get_coin_logger(coin: str):
     """Returns a thread-safe logger for a specific coin."""
-    logger = logging.getLogger(coin.upper())
-    if not logger.handlers:
-        path = f"logs/{coin.upper()}.log"
-        handler = logging.FileHandler(path)
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False 
-    return logger
+    return get_gsd_logger(coin.upper())
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
 # ═══════════════════════════════════════════════════════════════════════════════
 _stop    = threading.Event()
 _paused  = threading.Event()    # set = bot is paused
-_start_time = time.time()       # bot startup timestamp
 
 _strat   = StreakReversalStrategy()
 _mg      = _strat.martingale
@@ -98,6 +89,8 @@ _plock   = threading.Lock()
 
 _tradelog: List[Dict] = []
 _tlock    = threading.Lock()
+_start_time = time.time()
+_redeem_status = "Idle"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WALLET
@@ -168,6 +161,7 @@ def get_real_balance() -> float:
         except Exception as e: logging.debug(f"[BAL] USDC.n Error: {e}")
         
         final = round(total_raw / 1_000_000, 2)
+        update_metric("balances", "usdc", final)
         return final
     except Exception as e:
         logging.error(f"[BAL] Critical Error: {e}")
@@ -250,9 +244,8 @@ def _place(token_id: str, amount: float, coin: str,
 # ═══════════════════════════════════════════════════════════════════════════════
 # SETTLEMENT (Auto-Redeem)
 # ═══════════════════════════════════════════════════════════════════════════════
-_redeem_status = "Idle"
-
 def _redeem_all():
+    """Periodically check and redeem all winning positions on-chain."""
     global _redeem_status
     if DRY_RUN:
         _redeem_status = "Dry Run"
@@ -270,6 +263,7 @@ def _redeem_all():
                             signature_type=2 if FUNDER_ADDRESS else 1,
                             funder=FUNDER_ADDRESS or None)
 
+        # 1. Fetch unredeemed positions from Polymarket Data API
         url = f"https://data-api.polymarket.com/positions?user={WALLET_ADDRESS}&redeemable=true"
         r = requests.get(url, timeout=15)
         if r.status_code != 200:
@@ -280,19 +274,27 @@ def _redeem_all():
         if not positions:
             _redeem_status = "Nothing to redeem"
             return
-        
+
+        logging.info(f"[SETTLE] Found {len(positions)} unredeemed positions")
         _redeem_status = f"Redeeming {len(positions)}..."
+
         for pos in positions:
+            slug = pos.get("slug")
             cond = pos.get("conditionId")
-            if not cond: continue
+            if not slug or not cond: continue
+
+            logging.info(f"[SETTLE] Redeeming {slug}...")
             try:
-                client.redeem_positions(condition_id=cond)
-                time.sleep(2)
-            except: pass
-            
+                resp = client.redeem_positions(condition_id=cond)
+                logging.info(f"[SETTLE] ✅ Redeemed {slug}: {resp}")
+                time.sleep(2) # rate limit safety
+            except Exception as re:
+                logging.warning(f"[SETTLE] Failed redeem {slug}: {re}")
+                
         _redeem_status = "Last check success"
+
     except Exception as e:
-        logging.error(f"[SETTLE] {e}")
+        logging.error(f"[SETTLE] Error in redeem loop: {e}")
         _redeem_status = "Error"
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -317,7 +319,7 @@ class CoinProc:
 
         self.processed_ts = boundary
         self.warmup += 1
-        logging.info(f"[{coin}] Boundary {boundary}")
+        self.log.info(f"Boundary {boundary}")
 
         # 1. Resolve ANY pending bet (not just exact ts match)
         with _plock:
@@ -325,12 +327,9 @@ class CoinProc:
         if pend:
             pend_ts = pend.get("ts", 0)
             if pend_ts <= closed_ts:
-                # Resolve using the ORIGINAL market ts from when bet was placed
                 self._resolve(pend, pend_ts)
-            # else: bet is for a future market, skip
 
         # 2. Fetch close & store candle (ALWAYS, even during warmup)
-        #    Try API first, fallback to stored token from pending
         cp = None
         tkns = _tokens(coin, closed_ts)
         if tkns:
@@ -341,16 +340,16 @@ class CoinProc:
             cp = _price(pend["yes_token"])
         
         if cp is not None:
-            logging.info(f"[{coin}] Close: {cp:.4f}")
+            self.log.info(f"Close: {cp:.4f}")
             hm.push_candle(coin, closed_ts, cp)
         else:
-            logging.warning(f"[{coin}] Could not fetch close price")
+            self.log.warning("Could not fetch close price")
 
         # 3. Warmup — feed candle to strategy but don't trade
         if self.warmup < 3:
             if cp is not None:
-                _strat.on_candle_close(coin, closed_ts, cp)  # build history, ignore signal
-            logging.info(f"[{coin}] Warmup {self.warmup}/3 (candle stored)")
+                _strat.on_candle_close(coin, closed_ts, cp)
+            self.log.info(f"Warmup {self.warmup}/3 (candle stored)")
             return None
 
         # 4. Detect signal (only after warmup)
@@ -363,7 +362,7 @@ class CoinProc:
         # 5. Fetch active market tokens
         active_tkns = _tokens(coin, boundary)
         if not active_tkns:
-            logging.warning(f"[{coin}] No active market")
+            self.log.warning("No active market")
             return None
 
         sig["active_ts"]    = boundary
@@ -376,11 +375,9 @@ class CoinProc:
         coin       = self.coin
         direction  = pend["direction"]
         amount     = pend["amount"]
-        entry_price = pend["price"]  # ← FIX: was undefined 'entry_price'
+        entry_price = pend["price"]
 
-        # ── FIX: Use stored token IDs instead of re-fetching from API ──
-        # After a market closes, the API may not return data anymore.
-        # We already have the token IDs from when the bet was placed.
+        # Use stored token IDs instead of re-fetching from API
         yes_token = pend.get("yes_token")
         
         cp = None
@@ -394,13 +391,10 @@ class CoinProc:
                 cp = _price(tkns["yes_token"])
 
         if cp is None:
-            # ── FIX: Don't leave zombie positions ──
-            # If we can't get price, force-resolve based on last known data
-            # Check if market is old enough that it MUST have settled
             now = int(time.time())
             age = now - closed_ts
-            if age > INTERVAL_SEC * 2:  # More than 2 intervals old = definitely settled
-                logging.warning(f"[{coin}] Force-resolving stale position (age={age}s) as LOSS")
+            if age > INTERVAL_SEC * 2:
+                self.log.warning(f"Force-resolving stale position (age={age}s) as LOSS")
                 won = False
                 payout = 0.0
                 fee = amount * 0.0024
@@ -421,19 +415,17 @@ class CoinProc:
                 with _plock:
                     _pending[coin] = None
             else:
-                logging.warning(f"[{coin}] Resolve failed — no price (age={age}s, will retry)")
-                # DON'T clear pending — the next tick will retry
-                # But reset processed_ts so next boundary also tries
+                self.log.warning(f"Resolve failed — no price (age={age}s, will retry)")
             return
 
-        # ── Store candle for resolved market ──
+        # Store candle for resolved market
         hm.push_candle(coin, closed_ts, cp)
 
         won    = (cp > 0.5) if direction == "YES" else (cp < 0.5)
         payout = round(amount / entry_price, 4) if won else 0.0
         
-        # ── NET PnL Calculation (deducting 0.24% estimated fee) ──
-        fee    = (payout * 0.0024) if won else (amount * 0.0024)
+        # NET PnL Calculation (including 0.24% fee)
+        fee    = round(payout * 0.0024, 4) if won else round(amount * 0.0024, 4)
         pnl    = round(payout - amount - fee, 4) if won else -round(amount + fee, 4)
 
         _strat.on_result(coin, won)
@@ -444,6 +436,13 @@ class CoinProc:
 
         if DRY_RUN and won:
             _vbal_write(_vbal_read() + payout)
+        
+        # Update metrics
+        increment_trade(won)
+        today_data = hm.get_daily_pnl().get(hm._today_str(), {"pnl": 0.0})
+        update_metric("pnl", "daily", today_data.get("pnl", 0.0) if isinstance(today_data, dict) else today_data)
+        update_metric("pnl", "total", hm.get_total_pnl())
+        update_metric("balances", "virtual", _vbal_read())
 
         get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
 
@@ -456,7 +455,8 @@ class CoinProc:
         with _plock:
             _pending[coin] = None
 
-        logging.info(f"[{coin}] ✅ Resolved: {'WIN' if won else 'LOSS'} | PnL: {pnl:.4f} | Payout: {payout:.4f}")
+        self.log.info(f"✅ Resolved: {'WIN' if won else 'LOSS'} | PnL: {pnl:.4f} | Payout: {payout:.4f}")
+        update_metric("status", "last_resolution", f"{coin} {'WIN' if won else 'LOSS'}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL PICKER  (random, recovery priority)
@@ -487,7 +487,7 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
     # Already has pending?
     with _plock:
         if _pending.get(coin) is not None:
-            logging.info(f"[{coin}] Skip — already pending")
+            get_coin_logger(coin).info("Skip — already pending")
             return
 
     # ── FIXED: Fetch live market price from feed ──
@@ -563,6 +563,10 @@ def main():
     _mg.reset_all()
     if DRY_RUN and not os.path.exists(_VBAL):
         _vbal_write(VBAL_START)
+    
+    init_metrics()
+    update_metric(None, "status", "running")
+    update_metric("balances", "virtual", _vbal_read())
 
     # Build components
     tg_bot   = get_bot()
@@ -580,7 +584,8 @@ def main():
         }
     })
     data_feed.start()
-    
+    print(f"[SYSTEM] Feeds started: {', '.join(ACTIVE_COINS)}")
+
     # Wire telegram callbacks 
     tg_bot.active_coins = ACTIVE_COINS
     tg_bot.get_balance = get_wallet_balance
@@ -594,8 +599,7 @@ def main():
             if st:
                 out[c] = {"up_ask": st.get("up_ask", 0),
                            "down_ask": st.get("down_ask", 0),
-                           "seconds_till_end": st.get("seconds_till_end", 900),
-                           "last_msg_time": st.get("last_msg_time", 0.0)}
+                           "seconds_till_end": st.get("seconds_till_end", 900)}
         return out
     tg_bot.get_live_state = _live
 
@@ -697,7 +701,18 @@ def main():
         return f"❌ Order failed for {coin}."
     tg_bot.on_manual_bet = _manual
 
-    # Health report flow removed
+    # Signal handler
+    def _shutdown(sig, frame):
+        print("\n[SYSTEM] Stopping...")
+        _stop.set()
+        data_feed.stop()
+        try: os.remove(pid_file)
+        except: pass
+        stop_gsd_logging()
+        stop_metrics()
+        sys.exit(0)
+    signal.signal(signal.SIGINT,  _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     # Custom log bridge to dashboard
     class DashHandler(logging.Handler):
@@ -708,17 +723,6 @@ def main():
     dash_h = DashHandler()
     dash_h.setFormatter(logging.Formatter("%(message)s"))
     logging.getLogger().addHandler(dash_h)
-
-    # Signal handler
-    def _shutdown(sig, frame):
-        # We don't print here to avoid mess, dash.live handles cleanup
-        _stop.set()
-        data_feed.stop()
-        try: os.remove(pid_file)
-        except: pass
-        sys.exit(0)
-    signal.signal(signal.SIGINT,  _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
 
     # Telegram startup
     notifier.notify_startup(ACTIVE_COINS, DRY_RUN)
@@ -737,7 +741,6 @@ def main():
                                  "market_slug":st.get("market_slug","")}
                 with _plock:  ps = {c:_pending.get(c) for c in ACTIVE_COINS}
                 with _tlock:  tl = list(_tradelog)
-                
                 dash.render(ms, {c:_mg.get_step(c) for c in ACTIVE_COINS},
                             ps, tl, get_wallet_balance(), DRY_RUN)
             except Exception as e:
@@ -746,21 +749,21 @@ def main():
 
     threading.Thread(target=_dash, daemon=True, name="dashboard").start()
 
-    # Settlement loop (every 30m)
+    # Settlement/Redeem thread (runs every 30m)
     def _settle_loop():
         while not _stop.is_set():
             _redeem_all()
-            for _ in range(1800):
+            for _ in range(1800): # 30 mins
                 if _stop.is_set(): break
                 time.sleep(1)
-    threading.Thread(target=_settle_loop, daemon=True, name="settle").start()
+    threading.Thread(target=_settle_loop, daemon=True, name="settlement").start()
 
     # Coin processors
     procs = {c: CoinProc(c) for c in ACTIVE_COINS}
 
     # Main loop with parallel coin processing
     with dash.live_context():
-        dash.log("System Running (parallel)")
+        logger.info("System Running (parallel)")
         with ThreadPoolExecutor(max_workers=len(ACTIVE_COINS)) as executor:
             while not _stop.is_set():
                 now = int(time.time())
@@ -778,15 +781,16 @@ def main():
                         s = f.result()
                         if s: sigs.append(s)
                     except Exception as e:
-                        logging.error(f"[{coin}] Parallel tick error: {e}")
-                        dash.log_error(f"{coin}: {e}")
-
+                        logger.error(f"[{coin}] Parallel tick error: {e}")
+                
                 if sigs:
                     try:
                         _pick_and_place(sigs, notifier, data_feed)
                     except Exception as e:
-                        logging.error(f"[PICK] {e}")
+                        logger.error(f"[PICK] {e}")
 
+                # Heartbeat and Health
+                set_health_state(ws_connected=data_feed.is_alive())
                 time.sleep(1)
 
 
@@ -796,3 +800,4 @@ if __name__ == "__main__":
     finally:
         try: os.remove("data/bot.pid")
         except: pass
+        stop_gsd_logging()

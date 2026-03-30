@@ -19,7 +19,8 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from safety_guard import SafetyGuard
-import logging
+from utils.gsd_logger import get_gsd_logger
+logger = get_gsd_logger("EXEC")
 from trade_logger import log_buy_attempt, log_buy_result, log_sell_attempt, log_sell_result
 import threading
 
@@ -66,9 +67,9 @@ class OrderExecutor:
         with _blocked_markets_lock:
             if coin in _blocked_markets:
                 _blocked_markets[coin].add(market_slug)
-                print(f"[EXECUTOR] 🔒 MARKET BLOCKED: {coin.upper()} - {market_slug}")
+                logger.info(f"[EXECUTOR] 🔒 MARKET BLOCKED: {coin.upper()} - {market_slug}")
             else:
-                print(f"[EXECUTOR] ⚠️ Unknown coin: {coin}")
+                logger.info(f"[EXECUTOR] ⚠️ Unknown coin: {coin}")
     
     @staticmethod
     def unblock_market(market_slug: str, coin: str):
@@ -82,7 +83,7 @@ class OrderExecutor:
         with _blocked_markets_lock:
             if coin in _blocked_markets and market_slug in _blocked_markets[coin]:
                 _blocked_markets[coin].remove(market_slug)
-                print(f"[EXECUTOR] 🔓 MARKET UNBLOCKED: {coin.upper()} - {market_slug}")
+                logger.info(f"[EXECUTOR] 🔓 MARKET UNBLOCKED: {coin.upper()} - {market_slug}")
     
     @staticmethod
     def is_market_blocked(market_slug: str, coin: str) -> bool:
@@ -157,20 +158,20 @@ class OrderExecutor:
                         funder=funder_address
                     )
                 # 🚨 CRITICAL: Generate and set API credentials
-                print(f"[EXECUTOR] Generating API credentials...")
+                logger.info(f"[EXECUTOR] Generating API credentials...")
                 creds = self.client.create_or_derive_api_creds()
                 self.client.set_api_creds(creds)
-                print(f"[EXECUTOR] ✓ API credentials set")
+                logger.info(f"[EXECUTOR] ✓ API credentials set")
                 
-                print(f"[EXECUTOR] ✓ CLOB client initialized")
-                print(f"[EXECUTOR]    Wallet: {self.wallet_address[:6]}...{self.wallet_address[-4:]}")
-                print(f"[EXECUTOR]    Type: {wallet_type}")
+                logger.info(f"[EXECUTOR] ✓ CLOB client initialized")
+                logger.info(f"[EXECUTOR]    Wallet: {self.wallet_address[:6]}...{self.wallet_address[-4:]}")
+                logger.info(f"[EXECUTOR]    Type: {wallet_type}")
             except Exception as e:
-                print(f"[EXECUTOR] ❌ Failed to init CLOB client: {e}")
+                logger.info(f"[EXECUTOR] ❌ Failed to init CLOB client: {e}")
                 self.safety.activate_emergency_stop("CLOB_INIT_FAILED")
         else:
             self.private_key = ""  # DRY_RUN - no private key needed
-            print("[EXECUTOR] ✓ DRY_RUN mode (no real orders)")
+            logger.info("[EXECUTOR] ✓ DRY_RUN mode (no real orders)")
         
         # 🔥 RPC Configuration (Multiple endpoints with parallel requests)
         self.rpc_config = config.get('execution', {}).get('rpc_config', {})
@@ -188,18 +189,18 @@ class OrderExecutor:
         self.rpc_parallel_enabled = self.rpc_config.get('enable_parallel_requests', True)
         
         # Log RPC configuration
-        print(f"[EXECUTOR] {'='*60}")
-        print(f"[EXECUTOR] 🌐 RPC CONFIGURATION:")
-        print(f"[EXECUTOR]    Endpoints: {len(self.rpc_endpoints)}")
+        logger.info(f"[EXECUTOR] {'='*60}")
+        logger.info(f"[EXECUTOR] 🌐 RPC CONFIGURATION:")
+        logger.info(f"[EXECUTOR]    Endpoints: {len(self.rpc_endpoints)}")
         for i, rpc in enumerate(self.rpc_endpoints, 1):
             rpc_short = rpc.split('/')[2][:30] if '://' in rpc else rpc[:30]
-            print(f"[EXECUTOR]      #{i}: {rpc_short}...")
-        print(f"[EXECUTOR]    Single timeout: {self.rpc_single_timeout}s")
-        print(f"[EXECUTOR]    Parallel timeout: {self.rpc_parallel_timeout}s")
-        print(f"[EXECUTOR]    Retry attempts: {self.rpc_retry_attempts}")
-        print(f"[EXECUTOR]    Retry delay: {self.rpc_retry_delay}s")
-        print(f"[EXECUTOR]    Parallel mode: {'ENABLED ⚡' if self.rpc_parallel_enabled else 'DISABLED'}")
-        print(f"[EXECUTOR] {'='*60}\n")
+            logger.info(f"[EXECUTOR]      #{i}: {rpc_short}...")
+        logger.info(f"[EXECUTOR]    Single timeout: {self.rpc_single_timeout}s")
+        logger.info(f"[EXECUTOR]    Parallel timeout: {self.rpc_parallel_timeout}s")
+        logger.info(f"[EXECUTOR]    Retry attempts: {self.rpc_retry_attempts}")
+        logger.info(f"[EXECUTOR]    Retry delay: {self.rpc_retry_delay}s")
+        logger.info(f"[EXECUTOR]    Parallel mode: {'ENABLED ⚡' if self.rpc_parallel_enabled else 'DISABLED'}")
+        logger.info(f"[EXECUTOR] {'='*60}\n")
         
         # CTF contract for token balances
         self.CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -238,7 +239,7 @@ class OrderExecutor:
           - is_absolute: bool - if True, amount = full balance, else delta
         """
         self.balance_change_callback = callback
-        print("[EXECUTOR] ✓ Balance change callback registered")
+        logger.info("[EXECUTOR] ✓ Balance change callback registered")
     
     def set_market_closing_check(self, callback):
         """
@@ -250,7 +251,7 @@ class OrderExecutor:
         🔥 CRITICAL: Prevents buys AFTER stop-loss/flip-stop trigger
         """
         self.market_closing_check_callback = callback
-        print("[EXECUTOR] ✓ Market closing check callback registered")
+        logger.info("[EXECUTOR] ✓ Market closing check callback registered")
     
     def _log_redeem(self, market_slug: str, success: bool, amount: float, tx_hash: str = "", reason: str = ""):
         """Log redeem operation to separate file"""
@@ -266,7 +267,7 @@ class OrderExecutor:
                 status = "SUCCESS" if success else "FAILED"
                 f.write(f"{timestamp} | {market_slug} | {status} | ${amount:.2f} | {tx_hash} | {reason}\n")
         except Exception as e:
-            print(f"[ERROR] Failed to log redeem: {e}")
+            logger.info(f"[ERROR] Failed to log redeem: {e}")
     
     def get_wallet_usdc_balance(self) -> Optional[float]:
         """
@@ -278,7 +279,7 @@ class OrderExecutor:
                 self.wallet_address = Account.from_key(self.private_key).address
             
             if not self.wallet_address:
-                print("[EXECUTOR] ❌ No wallet address")
+                logger.info("[EXECUTOR] ❌ No wallet address")
                 return None
             
             # Use first RPC endpoint for wallet balance queries
@@ -286,7 +287,7 @@ class OrderExecutor:
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
             
             if not w3.is_connected():
-                print("[EXECUTOR] ⚠ Cannot connect to RPC")
+                logger.info("[EXECUTOR] ⚠ Cannot connect to RPC")
                 return None
             
             total = 0.0
@@ -309,11 +310,11 @@ class OrderExecutor:
             decimals_n = usdc_n.functions.decimals().call()
             total += balance_n / (10 ** decimals_n)
             
-            print(f"[EXECUTOR] Wallet balance: ${total:.2f}")
+            logger.info(f"[EXECUTOR] Wallet balance: ${total:.2f}")
             return total
             
         except Exception as e:
-            print(f"[EXECUTOR] ❌ Balance query error: {e}")
+            logger.info(f"[EXECUTOR] ❌ Balance query error: {e}")
             return None
     
     def get_pol_balance(self) -> Optional[float]:
@@ -328,7 +329,7 @@ class OrderExecutor:
                 self.wallet_address = Account.from_key(self.private_key).address
             
             if not self.wallet_address:
-                print("[EXECUTOR] ❌ No wallet address")
+                logger.info("[EXECUTOR] ❌ No wallet address")
                 return None
             
             # Use first RPC endpoint for wallet balance queries
@@ -336,7 +337,7 @@ class OrderExecutor:
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
             
             if not w3.is_connected():
-                print("[EXECUTOR] ⚠ Cannot connect to RPC")
+                logger.info("[EXECUTOR] ⚠ Cannot connect to RPC")
                 return None
             
             # Get native balance (in Wei)
@@ -344,11 +345,11 @@ class OrderExecutor:
             # Convert to POL (1 POL = 10^18 Wei)
             balance_pol = balance_wei / 1e18
             
-            print(f"[EXECUTOR] POL balance: {balance_pol:.4f}")
+            logger.info(f"[EXECUTOR] POL balance: {balance_pol:.4f}")
             return balance_pol
             
         except Exception as e:
-            print(f"[EXECUTOR] ❌ POL balance query error: {e}")
+            logger.info(f"[EXECUTOR] ❌ POL balance query error: {e}")
             return None
     
     def get_blockchain_token_balance(self, token_id: str) -> Optional[float]:
@@ -374,7 +375,7 @@ class OrderExecutor:
                 self.wallet_address = Account.from_key(self.private_key).address
             
             if not self.wallet_address:
-                print("[EXECUTOR] ❌ No wallet address for token balance query")
+                logger.info("[EXECUTOR] ❌ No wallet address for token balance query")
                 return None
             
             # 🔥 FUNCTION: Request to one RPC endpoint
@@ -401,21 +402,21 @@ class OrderExecutor:
                     balance = balance_raw / 1e6  # Convert from raw to USDC decimals (6 decimals)
                     
                     rpc_short = rpc_url.split('/')[2][:20] if '://' in rpc_url else rpc_url[:20]
-                    print(f"[EXECUTOR] ✅ RPC [{rpc_short}...] balance: {balance:.4f} contracts")
+                    logger.info(f"[EXECUTOR] ✅ RPC [{rpc_short}...] balance: {balance:.4f} contracts")
                     return balance
                     
                 except Exception as e:
                     rpc_short = rpc_url.split('/')[2][:20] if '://' in rpc_url else rpc_url[:20]
-                    print(f"[EXECUTOR] ⚠️  RPC [{rpc_short}...] failed: {type(e).__name__}")
+                    logger.info(f"[EXECUTOR] ⚠️  RPC [{rpc_short}...] failed: {type(e).__name__}")
                     return None
             
             # 🔥 RETRY LOOP with parallel or sequential requests
             for attempt in range(1, self.rpc_retry_attempts + 1):
-                print(f"[EXECUTOR] 🔄 Balance query attempt {attempt}/{self.rpc_retry_attempts}...")
+                logger.info(f"[EXECUTOR] 🔄 Balance query attempt {attempt}/{self.rpc_retry_attempts}...")
                 
                 if self.rpc_parallel_enabled and len(self.rpc_endpoints) > 1:
                     # 🚀 PARALLEL REQUESTS
-                    print(f"[EXECUTOR] 🚀 Querying {len(self.rpc_endpoints)} RPCs in parallel...")
+                    logger.info(f"[EXECUTOR] 🚀 Querying {len(self.rpc_endpoints)} RPCs in parallel...")
                     
                     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(self.rpc_endpoints))
                     
@@ -436,37 +437,37 @@ class OrderExecutor:
                                 if balance is not None:
                                     # 🔥 CRITICAL: Immediately cancel remaining futures!
                                     executor.shutdown(wait=False, cancel_futures=True)
-                                    print(f"[EXECUTOR] ✅ Got balance: {balance:.4f} contracts (token: {token_id[:16]}...)")
+                                    logger.info(f"[EXECUTOR] ✅ Got balance: {balance:.4f} contracts (token: {token_id[:16]}...)")
                                     return balance  # ← EARLY EXIT!
                             except Exception:
                                 continue
                         
                     except concurrent.futures.TimeoutError:
-                        print(f"[EXECUTOR] ⏱️  All RPCs timeout after {self.rpc_parallel_timeout}s")
+                        logger.info(f"[EXECUTOR] ⏱️  All RPCs timeout after {self.rpc_parallel_timeout}s")
                     finally:
                         # Guaranteed cleanup
                         executor.shutdown(wait=False, cancel_futures=True)
                 
                 else:
                     # 🔄 SEQUENTIAL REQUESTS (fallback or if parallel disabled)
-                    print(f"[EXECUTOR] 🔄 Querying RPCs sequentially...")
+                    logger.info(f"[EXECUTOR] 🔄 Querying RPCs sequentially...")
                     for rpc in self.rpc_endpoints:
                         balance = query_single_rpc(rpc, attempt)
                         if balance is not None:
-                            print(f"[EXECUTOR] ✅ Got balance: {balance:.4f} contracts (token: {token_id[:16]}...)")
+                            logger.info(f"[EXECUTOR] ✅ Got balance: {balance:.4f} contracts (token: {token_id[:16]}...)")
                             return balance  # ✅ Success!
                 
                 # Didn't get balance - wait before next attempt
                 if attempt < self.rpc_retry_attempts:
-                    print(f"[EXECUTOR] ⏸️  Waiting {self.rpc_retry_delay}s before retry...")
+                    logger.info(f"[EXECUTOR] ⏸️  Waiting {self.rpc_retry_delay}s before retry...")
                     time.sleep(self.rpc_retry_delay)
             
             # All attempts failed
-            print(f"[EXECUTOR] ❌ All {self.rpc_retry_attempts} attempts failed for all {len(self.rpc_endpoints)} RPC endpoints!")
+            logger.info(f"[EXECUTOR] ❌ All {self.rpc_retry_attempts} attempts failed for all {len(self.rpc_endpoints)} RPC endpoints!")
             return None
             
         except Exception as e:
-            print(f"[EXECUTOR] ❌ CRITICAL ERROR in get_blockchain_token_balance: {e}")
+            logger.info(f"[EXECUTOR] ❌ CRITICAL ERROR in get_blockchain_token_balance: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -494,7 +495,7 @@ class OrderExecutor:
             coin = market_slug.split('-')[0].lower()
             
             if coin not in ['btc', 'eth', 'sol', 'xrp']:
-                print(f"[EXECUTOR] ⚠️ Unknown coin in market_slug: {market_slug}")
+                logger.info(f"[EXECUTOR] ⚠️ Unknown coin in market_slug: {market_slug}")
                 return None
             
             # Get state from WebSocket
@@ -509,7 +510,7 @@ class OrderExecutor:
             elif side == 'DOWN':
                 bid = market_state.get('down_bid')
             else:
-                print(f"[EXECUTOR] ⚠️ Invalid side: {side}")
+                logger.info(f"[EXECUTOR] ⚠️ Invalid side: {side}")
                 return None
             
             # Validate BID price
@@ -519,7 +520,7 @@ class OrderExecutor:
                 return None
                 
         except Exception as e:
-            print(f"[EXECUTOR] ⚠️ Failed to get fresh BID: {e}")
+            logger.info(f"[EXECUTOR] ⚠️ Failed to get fresh BID: {e}")
             return None
     
     def place_buy_order(self, market_slug: str, token_id: str, side: str, 
@@ -584,7 +585,7 @@ class OrderExecutor:
                     success=False,
                     error=reason
                 )
-                print(f"[EXECUTOR] ❌ Order blocked: {reason}")
+                logger.info(f"[EXECUTOR] ❌ Order blocked: {reason}")
                 return result
         
         # 🔥 REAL TRADING WITH FAK PARTIAL FILL TRACKING
@@ -602,7 +603,7 @@ class OrderExecutor:
         # 🔥 RACE CONDITION PROTECTION #1: ATOMIC CHECK (highest priority!)
         # Check blocked_markets for THIS COIN FIRST before any operations
         if coin and OrderExecutor.is_market_blocked(market_slug, coin):
-            print(f"[EXECUTOR] 🛑 BLOCKED (ATOMIC): {coin.upper()} market {market_slug} is blocked!")
+            logger.info(f"[EXECUTOR] 🛑 BLOCKED (ATOMIC): {coin.upper()} market {market_slug} is blocked!")
             
             from trade_logger import trades_logger
             trades_logger.warning(
@@ -616,12 +617,12 @@ class OrderExecutor:
                 remaining_balance=0.0
             )
         
-        print(f"[EXECUTOR] 🎯 BUY TARGET: {target_contracts} {side} @ ${normalized_price:.2f} (ASK ${ask_price:.2f} +{SLIPPAGE_BUY*100:.0f}% slippage, max {MAX_FAK_ATTEMPTS} FAK)")
+        logger.info(f"[EXECUTOR] 🎯 BUY TARGET: {target_contracts} {side} @ ${normalized_price:.2f} (ASK ${ask_price:.2f} +{SLIPPAGE_BUY*100:.0f}% slippage, max {MAX_FAK_ATTEMPTS} FAK)")
         
         # 🔥 RACE CONDITION PROTECTION #2: Callback check (secondary)
         if coin and hasattr(self, 'market_closing_check_callback') and self.market_closing_check_callback:
             if self.market_closing_check_callback(market_slug, coin):
-                print(f"[EXECUTOR] 🛑 BLOCKED: {coin.upper()} market {market_slug} is closing (stop-loss/flip-stop triggered)")
+                logger.info(f"[EXECUTOR] 🛑 BLOCKED: {coin.upper()} market {market_slug} is closing (stop-loss/flip-stop triggered)")
                 
                 # 📝 LOG: Race condition block
                 from trade_logger import trades_logger
@@ -640,13 +641,13 @@ class OrderExecutor:
             try:
                 # 🔥 RACE CONDITION PROTECTION #1: ATOMIC CHECK in FAK loop
                 if coin and OrderExecutor.is_market_blocked(market_slug, coin):
-                    print(f"[EXECUTOR] 🛑 BLOCKED (ATOMIC in FAK {fak_attempt}): {coin.upper()} market {market_slug}")
+                    logger.info(f"[EXECUTOR] 🛑 BLOCKED (ATOMIC in FAK {fak_attempt}): {coin.upper()} market {market_slug}")
                     break  # Exit FAK loop immediately
                 
                 # 🔥 RACE CONDITION PROTECTION #2: Callback check
                 if coin and hasattr(self, 'market_closing_check_callback') and self.market_closing_check_callback:
                     if self.market_closing_check_callback(market_slug, coin):
-                        print(f"[EXECUTOR] 🛑 BLOCKED (attempt {fak_attempt}): {coin.upper()} market {market_slug} is closing")
+                        logger.info(f"[EXECUTOR] 🛑 BLOCKED (attempt {fak_attempt}): {coin.upper()} market {market_slug} is closing")
                         
                         # 📝 LOG: Race condition block during buy loop
                         from trade_logger import trades_logger
@@ -663,7 +664,7 @@ class OrderExecutor:
                 # Check: already bought enough?
                 if remaining_contracts <= 0.01 or total_filled_contracts >= target_contracts * TARGET_FILL_PERCENT:
                     fill_pct = (total_filled_contracts / target_contracts) * 100
-                    print(f"[EXECUTOR] ✅ BUY TARGET REACHED: {total_filled_contracts:.2f}/{target_contracts} ({fill_pct:.1f}%)")
+                    logger.info(f"[EXECUTOR] ✅ BUY TARGET REACHED: {total_filled_contracts:.2f}/{target_contracts} ({fill_pct:.1f}%)")
                     break
                 
                 # 🚨 CRITICAL: Convert contracts to DOLLARS!
@@ -672,11 +673,11 @@ class OrderExecutor:
                 
                 # 🚨 Minimum $1.00
                 if order_size_usd < MIN_ORDER_USD:
-                    print(f"[EXECUTOR] ⚠ Remaining ${order_size_usd:.2f} < ${MIN_ORDER_USD:.2f} minimum, stopping")
+                    logger.info(f"[EXECUTOR] ⚠ Remaining ${order_size_usd:.2f} < ${MIN_ORDER_USD:.2f} minimum, stopping")
                     break
                 
                 log_buy_attempt(market_slug, side, round(remaining_contracts, 2), normalized_price, fak_attempt, MAX_FAK_ATTEMPTS)
-                print(f"[EXECUTOR] [FAK {fak_attempt}/{MAX_FAK_ATTEMPTS}] Ordering {round(remaining_contracts, 2)} contracts of {side} @ ${normalized_price:.2f} (=${order_size_usd:.2f})")
+                logger.info(f"[EXECUTOR] [FAK {fak_attempt}/{MAX_FAK_ATTEMPTS}] Ordering {round(remaining_contracts, 2)} contracts of {side} @ ${normalized_price:.2f} (=${order_size_usd:.2f})")
                 
                 start_time = time.time()
                 
@@ -705,8 +706,8 @@ class OrderExecutor:
                     log_buy_result(market_slug, side, target_contracts, total_filled_contracts, target_contracts * normalized_price, total_spent_usd, True, fak_attempts=fak_attempt, elapsed_ms=elapsed_ms)
                     
                     fill_pct = (total_filled_contracts / target_contracts) * 100
-                    print(f"[EXECUTOR]   → Filled {taking_amount:.2f} contracts for ${making_amount:.2f} ({elapsed_ms}ms)")
-                    print(f"[EXECUTOR]   → Progress: {total_filled_contracts:.2f}/{target_contracts} ({fill_pct:.1f}%)")
+                    logger.info(f"[EXECUTOR]   → Filled {taking_amount:.2f} contracts for ${making_amount:.2f} ({elapsed_ms}ms)")
+                    logger.info(f"[EXECUTOR]   → Progress: {total_filled_contracts:.2f}/{target_contracts} ({fill_pct:.1f}%)")
                     
                     # Write to SafetyGuard
                     self.safety.record_order(
@@ -731,16 +732,16 @@ class OrderExecutor:
                     
                 else:
                     error_msg = api_result.get("errorMsg", "Unknown")
-                    print(f"[EXECUTOR] ⚠ [FAK {fak_attempt}] FAILED: {error_msg}")
-                    print(f"[EXECUTOR]   🔍 Full API response: {json.dumps(api_result, indent=2)}")
-                    print(f"[EXECUTOR]   📋 Sent OrderArgs: price=${sell_price:.2f}, size={remaining_contracts:.2f} contracts, side=SELL, token={token_id}")
+                    logger.info(f"[EXECUTOR] ⚠ [FAK {fak_attempt}] FAILED: {error_msg}")
+                    logger.info(f"[EXECUTOR]   🔍 Full API response: {json.dumps(api_result, indent=2)}")
+                    logger.info(f"[EXECUTOR]   📋 Sent OrderArgs: price=${sell_price:.2f}, size={remaining_contracts:.2f} contracts, side=SELL, token={token_id}")
                 
                 # Pause before next FAK attempt
                 if fak_attempt < MAX_FAK_ATTEMPTS:
                     time.sleep(RETRY_DELAY)
                     
             except Exception as e:
-                print(f"[EXECUTOR] ❌ [FAK {fak_attempt}] Exception: {e}")
+                logger.info(f"[EXECUTOR] ❌ [FAK {fak_attempt}] Exception: {e}")
                     # Log failed attempt
                 if fak_attempt < MAX_FAK_ATTEMPTS:
                     time.sleep(RETRY_DELAY)
@@ -762,21 +763,21 @@ class OrderExecutor:
             )
             
             if fill_pct >= TARGET_FILL_PERCENT * 100:
-                print(f"[EXECUTOR] ✅ BUY SUCCESS: {total_filled_contracts:.2f}/{target_contracts} contracts, ${total_spent_usd:.2f}")
+                logger.info(f"[EXECUTOR] ✅ BUY SUCCESS: {total_filled_contracts:.2f}/{target_contracts} contracts, ${total_spent_usd:.2f}")
             else:
-                print(f"[EXECUTOR] ⚠ PARTIAL BUY: {total_filled_contracts:.2f}/{target_contracts} ({fill_pct:.1f}%), ${total_spent_usd:.2f}")
+                logger.info(f"[EXECUTOR] ⚠ PARTIAL BUY: {total_filled_contracts:.2f}/{target_contracts} ({fill_pct:.1f}%), ${total_spent_usd:.2f}")
             
             # Notify balance change (spent money)
             if self.balance_change_callback and not result.dry_run:
                 try:
                     self.balance_change_callback(-total_spent_usd, "BUY")
                 except Exception as e:
-                    print(f"[EXECUTOR] ⚠ Balance callback error: {e}")
+                    logger.info(f"[EXECUTOR] ⚠ Balance callback error: {e}")
             
             return result
         else:
             log_buy_result(market_slug, side, target_contracts, total_filled_contracts, target_contracts * normalized_price, total_spent_usd, False, error="NO_FILL_AFTER_FAK", fak_attempts=MAX_FAK_ATTEMPTS)
-            print(f"[EXECUTOR] ❌ BUY FAILED: No fills after {MAX_FAK_ATTEMPTS} FAK attempts")
+            logger.info(f"[EXECUTOR] ❌ BUY FAILED: No fills after {MAX_FAK_ATTEMPTS} FAK attempts")
             return OrderResult(
                 success=False, 
                 error=f"NO_FILL_AFTER_{MAX_FAK_ATTEMPTS}_FAK",
@@ -832,32 +833,32 @@ class OrderExecutor:
         SWEEP_RETRY_DELAY = exec_config.get('sweep_retry_delay_sec', 1.0)
         
         # Log parameters
-        print(f"\n[EXECUTOR] {'='*60}")
-        print(f"[EXECUTOR] 🔥 FOK CHUNKED SELL STARTED")
-        print(f"[EXECUTOR] {'='*60}")
-        print(f"[EXECUTOR] Market: {market_slug}")
-        print(f"[EXECUTOR] Side: {side}")
-        print(f"[EXECUTOR] Tracked Position: {contracts:.2f} contracts")
-        print(f"[EXECUTOR] ")
-        print(f"[EXECUTOR] ⚙️  CONFIG:")
-        print(f"[EXECUTOR]    Strategy: {STRATEGY}")
-        print(f"[EXECUTOR]    Chunk Size: {CHUNK_SIZE} contracts")
-        print(f"[EXECUTOR]    Chunk Delay: {CHUNK_DELAY}s")
-        print(f"[EXECUTOR]    Max Chunk Retries: {MAX_CHUNK_RETRIES}")
-        print(f"[EXECUTOR]    Price: ${PRICE:.2f} (aggressive market order)")
-        print(f"[EXECUTOR]    Dust Threshold: {MIN_DUST_THRESHOLD}")
-        print(f"[EXECUTOR] {'='*60}\n")
+        logger.info(f"\n[EXECUTOR] {'='*60}")
+        logger.info(f"[EXECUTOR] 🔥 FOK CHUNKED SELL STARTED")
+        logger.info(f"[EXECUTOR] {'='*60}")
+        logger.info(f"[EXECUTOR] Market: {market_slug}")
+        logger.info(f"[EXECUTOR] Side: {side}")
+        logger.info(f"[EXECUTOR] Tracked Position: {contracts:.2f} contracts")
+        logger.info(f"[EXECUTOR] ")
+        logger.info(f"[EXECUTOR] ⚙️  CONFIG:")
+        logger.info(f"[EXECUTOR]    Strategy: {STRATEGY}")
+        logger.info(f"[EXECUTOR]    Chunk Size: {CHUNK_SIZE} contracts")
+        logger.info(f"[EXECUTOR]    Chunk Delay: {CHUNK_DELAY}s")
+        logger.info(f"[EXECUTOR]    Max Chunk Retries: {MAX_CHUNK_RETRIES}")
+        logger.info(f"[EXECUTOR]    Price: ${PRICE:.2f} (aggressive market order)")
+        logger.info(f"[EXECUTOR]    Dust Threshold: {MIN_DUST_THRESHOLD}")
+        logger.info(f"[EXECUTOR] {'='*60}\n")
         
         # ═══════════════════════════════════════════════════════════
         # STEP 1: GET INITIAL BALANCE FROM BLOCKCHAIN
         # ═══════════════════════════════════════════════════════════
-        print(f"[EXECUTOR] [STEP 1] 📊 Fetching balance from blockchain...")
+        logger.info(f"[EXECUTOR] [STEP 1] 📊 Fetching balance from blockchain...")
         
         initial_balance = self.get_blockchain_token_balance(token_id)
         
         if initial_balance is None:
             error_msg = "RPC_UNAVAILABLE_CANNOT_GET_BALANCE"
-            print(f"[EXECUTOR] ❌ CRITICAL: Cannot get balance from blockchain!")
+            logger.info(f"[EXECUTOR] ❌ CRITICAL: Cannot get balance from blockchain!")
             self._send_telegram_alert(
                 f"🚨 SELL FAILED: Cannot get balance!\n"
                 f"\nMarket: {market_slug}"
@@ -867,11 +868,11 @@ class OrderExecutor:
             )
             return OrderResult(success=False, error=error_msg)
         
-        print(f"[EXECUTOR] ✓ Blockchain balance: {initial_balance:.4f} contracts")
+        logger.info(f"[EXECUTOR] ✓ Blockchain balance: {initial_balance:.4f} contracts")
         
         # Check: if balance is already near 0
         if initial_balance < MIN_DUST_THRESHOLD:
-            print(f"[EXECUTOR] ✓ Balance below dust threshold ({MIN_DUST_THRESHOLD}), nothing to sell")
+            logger.info(f"[EXECUTOR] ✓ Balance below dust threshold ({MIN_DUST_THRESHOLD}), nothing to sell")
             return OrderResult(
                 success=True,
                 filled_size=0.0,
@@ -883,7 +884,7 @@ class OrderExecutor:
         # ═══════════════════════════════════════════════════════════
         # STEP 2: SPLIT INTO CHUNKS
         # ═══════════════════════════════════════════════════════════
-        print(f"\n[EXECUTOR] [STEP 2] 🔪 Splitting into chunks...")
+        logger.info(f"\n[EXECUTOR] [STEP 2] 🔪 Splitting into chunks...")
         
         chunks = []
         remaining = initial_balance
@@ -894,16 +895,16 @@ class OrderExecutor:
             chunk = min(CHUNK_SIZE, remaining)
             chunks.append(chunk)
             remaining -= chunk
-            print(f"[EXECUTOR]    Chunk #{chunk_num}: {chunk:.2f} contracts")
+            logger.info(f"[EXECUTOR]    Chunk #{chunk_num}: {chunk:.2f} contracts")
         
-        print(f"[EXECUTOR] ✓ Total chunks: {len(chunks)}")
-        print(f"[EXECUTOR] ✓ Total to sell: {sum(chunks):.2f} contracts")
-        print(f"[EXECUTOR] ✓ Estimated time: {len(chunks) * CHUNK_DELAY:.1f}s")
+        logger.info(f"[EXECUTOR] ✓ Total chunks: {len(chunks)}")
+        logger.info(f"[EXECUTOR] ✓ Total to sell: {sum(chunks):.2f} contracts")
+        logger.info(f"[EXECUTOR] ✓ Estimated time: {len(chunks) * CHUNK_DELAY:.1f}s")
         
         # ═══════════════════════════════════════════════════════════
         # STEP 3: SEND EACH CHUNK WITH INSTANT RETRY
         # ═══════════════════════════════════════════════════════════
-        print(f"\n[EXECUTOR] [STEP 3] 🚀 Sending FOK orders...")
+        logger.info(f"\n[EXECUTOR] [STEP 3] 🚀 Sending FOK orders...")
         
         total_sold = 0.0
         total_received_usd = 0.0
@@ -920,8 +921,8 @@ class OrderExecutor:
             # RETRY LOOP: Instant retry on failed (NO pause!)
             # ════════════════════════════════════════════════════════
             for attempt in range(1, MAX_CHUNK_RETRIES + 1):
-                print(f"\n[EXECUTOR] [FOK {i}/{len(chunks)}] Attempt {attempt}/{MAX_CHUNK_RETRIES}")
-                print(f"[EXECUTOR]    Selling {chunk:.2f} contracts @ ${PRICE:.2f}...")
+                logger.info(f"\n[EXECUTOR] [FOK {i}/{len(chunks)}] Attempt {attempt}/{MAX_CHUNK_RETRIES}")
+                logger.info(f"[EXECUTOR]    Selling {chunk:.2f} contracts @ ${PRICE:.2f}...")
                 
                 # 📝 LOG: Attempt to sell chunk
                 log_sell_attempt(
@@ -937,7 +938,7 @@ class OrderExecutor:
                 
                 # DRY RUN check
                 if self.safety.dry_run:
-                    print(f"[EXECUTOR] [FOK {i}] ✓ DRY_RUN: Simulated success")
+                    logger.info(f"[EXECUTOR] [FOK {i}] ✓ DRY_RUN: Simulated success")
                     total_sold += chunk
                     total_received_usd += chunk * PRICE
                     successful_chunks += 1
@@ -968,7 +969,7 @@ class OrderExecutor:
                         # 🔥 CRITICAL CHECK: FOK_ORDER_NOT_FILLED or amounts = 0
                         if error_msg and ("FOK_ORDER_NOT_FILLED" in error_msg or "not filled" in error_msg.lower()):
                             # FOK couldn't be fully filled - this is FAILURE!
-                            print(f"[EXECUTOR] [FOK {i}] ❌ NOT FILLED (attempt {attempt}): {error_msg}")
+                            logger.info(f"[EXECUTOR] [FOK {i}] ❌ NOT FILLED (attempt {attempt}): {error_msg}")
                             if attempt == MAX_CHUNK_RETRIES:
                                 log_sell_result(
                                     market_slug=market_slug,
@@ -986,7 +987,7 @@ class OrderExecutor:
                             
                         elif taking_amount == 0 or making_amount == 0:
                             # Amounts = 0 means nothing was sold!
-                            print(f"[EXECUTOR] [FOK {i}] ❌ ZERO FILL (attempt {attempt}): taking={taking_amount}, making={making_amount}")
+                            logger.info(f"[EXECUTOR] [FOK {i}] ❌ ZERO FILL (attempt {attempt}): taking={taking_amount}, making={making_amount}")
                             if attempt == MAX_CHUNK_RETRIES:
                                 log_sell_result(
                                     market_slug=market_slug,
@@ -1012,12 +1013,12 @@ class OrderExecutor:
                             successful_chunks += 1
                             chunk_sold = True
                             
-                            print(f"[EXECUTOR] [FOK {i}] ✅ SUCCESS (attempt {attempt})!")
-                            print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                            print(f"[EXECUTOR]    Received: ${received:.2f}")
-                            print(f"[EXECUTOR]    Time: {attempt_elapsed}ms")
+                            logger.info(f"[EXECUTOR] [FOK {i}] ✅ SUCCESS (attempt {attempt})!")
+                            logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                            logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
+                            logger.info(f"[EXECUTOR]    Time: {attempt_elapsed}ms")
                             if error_msg:
-                                print(f"[EXECUTOR]    Warning: {error_msg}")
+                                logger.info(f"[EXECUTOR]    Warning: {error_msg}")
                             
                             # Log success
                             try:
@@ -1033,21 +1034,21 @@ class OrderExecutor:
                                     elapsed_ms=attempt_elapsed
                                 )
                             except Exception as log_err:
-                                print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                             
                             # Notify balance change
                             if self.balance_change_callback:
                                 try:
                                     self.balance_change_callback(received, "SELL")
                                 except Exception as cb_err:
-                                    print(f"[EXECUTOR] ⚠️ Balance callback error: {cb_err}")
+                                    logger.info(f"[EXECUTOR] ⚠️ Balance callback error: {cb_err}")
                             
                             break  # ← Exit retry loop, go to next chunk
                     
                     else:
                         # ❌ FAILED → instant retry (NO pause!)
                         error = api_result.get("errorMsg", "UNKNOWN") if api_result else "NO_API_RESPONSE"
-                        print(f"[EXECUTOR] [FOK {i}] ❌ FAILED (attempt {attempt}): {error}")
+                        logger.info(f"[EXECUTOR] [FOK {i}] ❌ FAILED (attempt {attempt}): {error}")
                         
                         if attempt == MAX_CHUNK_RETRIES:
                             # Last attempt - log it
@@ -1065,18 +1066,18 @@ class OrderExecutor:
                                     elapsed_ms=attempt_elapsed
                                 )
                             except Exception as log_err:
-                                print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                         # NO time.sleep() - immediately next attempt!
                 
                 except Exception as e:
-                    print(f"[EXECUTOR] [FOK {i}] ❌ EXCEPTION (attempt {attempt}): {e}")
+                    logger.info(f"[EXECUTOR] [FOK {i}] ❌ EXCEPTION (attempt {attempt}): {e}")
                     if attempt == MAX_CHUNK_RETRIES:
                         chunk_sold = False
             
             # If not sold after all attempts
             if not chunk_sold:
                 chunk_elapsed = int((time.time() - chunk_start) * 1000)
-                print(f"[EXECUTOR] [FOK {i}] ⚠️  FAILED after {MAX_CHUNK_RETRIES} attempts ({chunk_elapsed}ms)")
+                logger.info(f"[EXECUTOR] [FOK {i}] ⚠️  FAILED after {MAX_CHUNK_RETRIES} attempts ({chunk_elapsed}ms)")
                 failed_chunks.append({'chunk': i, 'size': chunk, 'attempts': MAX_CHUNK_RETRIES})
             
             # ════════════════════════════════════════════════════════
@@ -1084,42 +1085,42 @@ class OrderExecutor:
             # (only if this is not the last chunk)
             # ════════════════════════════════════════════════════════
             if i < len(chunks):
-                print(f"[EXECUTOR] [FOK {i}] Waiting {CHUNK_DELAY}s before next chunk...")
+                logger.info(f"[EXECUTOR] [FOK {i}] Waiting {CHUNK_DELAY}s before next chunk...")
                 time.sleep(CHUNK_DELAY)
         
         total_elapsed = time.time() - start_time
         
-        print(f"\n[EXECUTOR] Chunks completed in {total_elapsed:.1f}s")
-        print(f"[EXECUTOR]    Successful: {successful_chunks}/{len(chunks)}")
-        print(f"[EXECUTOR]    Failed: {len(failed_chunks)}")
+        logger.info(f"\n[EXECUTOR] Chunks completed in {total_elapsed:.1f}s")
+        logger.info(f"[EXECUTOR]    Successful: {successful_chunks}/{len(chunks)}")
+        logger.info(f"[EXECUTOR]    Failed: {len(failed_chunks)}")
         
         # ═══════════════════════════════════════════════════════════
         # STEP 4: FINAL BALANCE CHECK
         # ═══════════════════════════════════════════════════════════
-        print(f"\n[EXECUTOR] [STEP 4] 🔍 Final balance check...")
+        logger.info(f"\n[EXECUTOR] [STEP 4] 🔍 Final balance check...")
         
         final_balance = self.get_blockchain_token_balance(token_id)
         
         if final_balance is None:
-            print(f"[EXECUTOR] ⚠️  WARNING: Cannot verify final balance (RPC error)")
+            logger.info(f"[EXECUTOR] ⚠️  WARNING: Cannot verify final balance (RPC error)")
             final_balance = initial_balance - total_sold  # Estimate
         
-        print(f"[EXECUTOR] ✓ Final balance: {final_balance:.4f} contracts")
+        logger.info(f"[EXECUTOR] ✓ Final balance: {final_balance:.4f} contracts")
         
         # ═══════════════════════════════════════════════════════════
         # STEP 4.5: FINAL SWEEP (if balance remains)
         # ═══════════════════════════════════════════════════════════
         if final_balance > MIN_DUST_THRESHOLD:
-            print(f"\n[EXECUTOR] [STEP 4.5] 🧹 FINAL SWEEP REQUIRED")
-            print(f"[EXECUTOR] ⚠️  Remaining balance: {final_balance:.2f} contracts")
-            print(f"[EXECUTOR] Attempting to sell remainder...")
+            logger.info(f"\n[EXECUTOR] [STEP 4.5] 🧹 FINAL SWEEP REQUIRED")
+            logger.info(f"[EXECUTOR] ⚠️  Remaining balance: {final_balance:.2f} contracts")
+            logger.info(f"[EXECUTOR] Attempting to sell remainder...")
             
             sweep_success = False
             
             for sweep_attempt in range(1, SWEEP_MAX_ATTEMPTS + 1):
                 sweep_start = time.time()
                 
-                print(f"\n[EXECUTOR] [SWEEP {sweep_attempt}/{SWEEP_MAX_ATTEMPTS}] Selling {final_balance:.2f} @ ${PRICE:.2f}...")
+                logger.info(f"\n[EXECUTOR] [SWEEP {sweep_attempt}/{SWEEP_MAX_ATTEMPTS}] Selling {final_balance:.2f} @ ${PRICE:.2f}...")
                 
                 # 📝 LOG: Sweep attempt
                 log_sell_attempt(
@@ -1133,7 +1134,7 @@ class OrderExecutor:
                 
                 # DRY RUN check
                 if self.safety.dry_run:
-                    print(f"[EXECUTOR] [SWEEP {sweep_attempt}] ✓ DRY_RUN: Simulated success")
+                    logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] ✓ DRY_RUN: Simulated success")
                     total_sold += final_balance
                     total_received_usd += final_balance * PRICE
                     sweep_success = True
@@ -1155,8 +1156,8 @@ class OrderExecutor:
                     sweep_elapsed = int((time.time() - sweep_start) * 1000)
                     
                     # 🔥 DEBUG: Log full API response
-                    print(f"[EXECUTOR] [SWEEP {sweep_attempt}] API Response:")
-                    print(f"[EXECUTOR]    Raw: {api_result}")
+                    logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] API Response:")
+                    logger.info(f"[EXECUTOR]    Raw: {api_result}")
                     
                     if api_result and api_result.get("success"):
                         # Check errorMsg and amounts
@@ -1168,7 +1169,7 @@ class OrderExecutor:
                         # 🔥 CRITICAL CHECK: FOK_ORDER_NOT_FILLED or amounts = 0
                         if error_msg and ("FOK_ORDER_NOT_FILLED" in error_msg or "not filled" in error_msg.lower()):
                             # FOK couldn't be filled
-                            print(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ NOT FILLED: {error_msg}")
+                            logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ NOT FILLED: {error_msg}")
                             try:
                                 log_sell_result(
                                     market_slug=market_slug,
@@ -1183,12 +1184,12 @@ class OrderExecutor:
                                     elapsed_ms=sweep_elapsed
                                 )
                             except Exception as log_err:
-                                print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                             # Continue retry loop
                             
                         elif taking_amount == 0 or making_amount == 0:
                             # Amounts = 0 means nothing was sold
-                            print(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ ZERO FILL: taking={taking_amount}, making={making_amount}")
+                            logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ ZERO FILL: taking={taking_amount}, making={making_amount}")
                             try:
                                 log_sell_result(
                                     market_slug=market_slug,
@@ -1203,7 +1204,7 @@ class OrderExecutor:
                                     elapsed_ms=sweep_elapsed
                                 )
                             except Exception as log_err:
-                                print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                             # Continue retry loop
                             
                         else:
@@ -1215,12 +1216,12 @@ class OrderExecutor:
                             total_received_usd += received
                             sweep_success = True
                             
-                            print(f"[EXECUTOR] [SWEEP {sweep_attempt}] ✅ SUCCESS!")
-                            print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                            print(f"[EXECUTOR]    Received: ${received:.2f}")
-                            print(f"[EXECUTOR]    Time: {sweep_elapsed}ms")
+                            logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] ✅ SUCCESS!")
+                            logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                            logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
+                            logger.info(f"[EXECUTOR]    Time: {sweep_elapsed}ms")
                             if error_msg:
-                                print(f"[EXECUTOR]    Warning: {error_msg}")
+                                logger.info(f"[EXECUTOR]    Warning: {error_msg}")
                             
                             # Log success
                             try:
@@ -1236,7 +1237,7 @@ class OrderExecutor:
                                     elapsed_ms=sweep_elapsed
                                 )
                             except Exception as log_err:
-                                print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                             
                             # Re-check balance
                             final_balance = self.get_blockchain_token_balance(token_id)
@@ -1244,14 +1245,14 @@ class OrderExecutor:
                                 final_balance = 0.0  # Assume success
                             
                             if final_balance < MIN_DUST_THRESHOLD:
-                                print(f"[EXECUTOR] ✅ All sold! (remaining dust: {final_balance:.4f})")
+                                logger.info(f"[EXECUTOR] ✅ All sold! (remaining dust: {final_balance:.4f})")
                                 break
                             else:
-                                print(f"[EXECUTOR] ⚠️  Still remaining: {final_balance:.2f}, will retry...")
+                                logger.info(f"[EXECUTOR] ⚠️  Still remaining: {final_balance:.2f}, will retry...")
                     
                     else:
                         error = api_result.get("errorMsg", "UNKNOWN") if api_result else "NO_API_RESPONSE"
-                        print(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ FAILED: {error}")
+                        logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ FAILED: {error}")
                         
                         # Log failure
                         try:
@@ -1268,20 +1269,20 @@ class OrderExecutor:
                                 elapsed_ms=sweep_elapsed
                             )
                         except Exception as log_err:
-                            print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                            logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                 
                 except Exception as e:
-                    print(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ EXCEPTION: {e}")
+                    logger.info(f"[EXECUTOR] [SWEEP {sweep_attempt}] ❌ EXCEPTION: {e}")
                 
                 # Retry delay (except last attempt)
                 if sweep_attempt < SWEEP_MAX_ATTEMPTS and not sweep_success:
-                    print(f"[EXECUTOR] Waiting {SWEEP_RETRY_DELAY}s before retry...")
+                    logger.info(f"[EXECUTOR] Waiting {SWEEP_RETRY_DELAY}s before retry...")
                     time.sleep(SWEEP_RETRY_DELAY)
                     
                     # Re-check balance before next attempt
                     final_balance = self.get_blockchain_token_balance(token_id)
                     if final_balance is None or final_balance < MIN_DUST_THRESHOLD:
-                        print(f"[EXECUTOR] Balance cleared or unavailable, stopping sweep")
+                        logger.info(f"[EXECUTOR] Balance cleared or unavailable, stopping sweep")
                         break
             
             # Final check after sweep
@@ -1289,9 +1290,9 @@ class OrderExecutor:
             if final_balance is None:
                 final_balance = 0.0  # Assume cleared
             
-            print(f"\n[EXECUTOR] Sweep completed:")
-            print(f"[EXECUTOR]    Success: {sweep_success}")
-            print(f"[EXECUTOR]    Final balance: {final_balance:.4f}")
+            logger.info(f"\n[EXECUTOR] Sweep completed:")
+            logger.info(f"[EXECUTOR]    Success: {sweep_success}")
+            logger.info(f"[EXECUTOR]    Final balance: {final_balance:.4f}")
             
             # ═══════════════════════════════════════════════════════════
             # 🔥 FIX 3: SWEEP FALLBACK (FOK → FAK → Market)
@@ -1302,20 +1303,20 @@ class OrderExecutor:
             SWEEP_MARKET_PRICE = exec_config.get('sweep_market_price', 0.01)
             
             if SWEEP_ENABLE_FALLBACK and not sweep_success and final_balance > MIN_DUST_THRESHOLD:
-                print(f"\n[EXECUTOR] [STEP 4.6] 🔄 SWEEP FALLBACK ACTIVATED")
-                print(f"[EXECUTOR] FOK failed, trying FAK → Market order")
+                logger.info(f"\n[EXECUTOR] [STEP 4.6] 🔄 SWEEP FALLBACK ACTIVATED")
+                logger.info(f"[EXECUTOR] FOK failed, trying FAK → Market order")
                 
                 # ─────────────────────────────────────────────────────
                 # FALLBACK #1: FAK (Fill-And-Kill)
                 # ─────────────────────────────────────────────────────
-                print(f"\n[EXECUTOR] [FALLBACK FAK] Attempting FAK orders...")
+                logger.info(f"\n[EXECUTOR] [FALLBACK FAK] Attempting FAK orders...")
                 
                 for fak_attempt in range(1, SWEEP_FAK_ATTEMPTS + 1):
                     if final_balance < MIN_DUST_THRESHOLD:
                         break
                     
                     fak_start = time.time()
-                    print(f"\n[EXECUTOR] [FAK {fak_attempt}/{SWEEP_FAK_ATTEMPTS}] Selling {final_balance:.2f} @ ${PRICE:.2f}...")
+                    logger.info(f"\n[EXECUTOR] [FAK {fak_attempt}/{SWEEP_FAK_ATTEMPTS}] Selling {final_balance:.2f} @ ${PRICE:.2f}...")
                     
                     # 📝 LOG: FAK attempt
                     log_sell_attempt(
@@ -1329,7 +1330,7 @@ class OrderExecutor:
                     
                     # DRY RUN check
                     if self.safety.dry_run:
-                        print(f"[EXECUTOR] [FAK {fak_attempt}] ✓ DRY_RUN: Simulated success")
+                        logger.info(f"[EXECUTOR] [FAK {fak_attempt}] ✓ DRY_RUN: Simulated success")
                         total_sold += final_balance
                         total_received_usd += final_balance * PRICE
                         final_balance = 0.0
@@ -1350,8 +1351,8 @@ class OrderExecutor:
                         fak_elapsed = int((time.time() - fak_start) * 1000)
                         
                         # 🔥 DEBUG: Log full API response
-                        print(f"[EXECUTOR] [FAK {fak_attempt}] API Response:")
-                        print(f"[EXECUTOR]    Raw: {api_result}")
+                        logger.info(f"[EXECUTOR] [FAK {fak_attempt}] API Response:")
+                        logger.info(f"[EXECUTOR]    Raw: {api_result}")
                         
                         if api_result and api_result.get("success"):
                             taking_amount = float(api_result.get("takingAmount", 0))
@@ -1365,10 +1366,10 @@ class OrderExecutor:
                                 total_sold += filled
                                 total_received_usd += received
                                 
-                                print(f"[EXECUTOR] [FAK {fak_attempt}] ✅ SUCCESS!")
-                                print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                                print(f"[EXECUTOR]    Received: ${received:.2f}")
-                                print(f"[EXECUTOR]    Time: {fak_elapsed}ms")
+                                logger.info(f"[EXECUTOR] [FAK {fak_attempt}] ✅ SUCCESS!")
+                                logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                                logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
+                                logger.info(f"[EXECUTOR]    Time: {fak_elapsed}ms")
                                 
                                 # Log success
                                 try:
@@ -1384,7 +1385,7 @@ class OrderExecutor:
                                         elapsed_ms=fak_elapsed
                                     )
                                 except Exception as log_err:
-                                    print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                    logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                                 
                                 # Re-check balance
                                 final_balance = self.get_blockchain_token_balance(token_id)
@@ -1393,13 +1394,13 @@ class OrderExecutor:
                                     break
                             else:
                                 # ❌ Not sold
-                                print(f"[EXECUTOR] [FAK {fak_attempt}] ❌ NO FILL")
+                                logger.info(f"[EXECUTOR] [FAK {fak_attempt}] ❌ NO FILL")
                         else:
                             error = api_result.get("errorMsg", "UNKNOWN") if api_result else "NO_API_RESPONSE"
-                            print(f"[EXECUTOR] [FAK {fak_attempt}] ❌ FAILED: {error}")
+                            logger.info(f"[EXECUTOR] [FAK {fak_attempt}] ❌ FAILED: {error}")
                     
                     except Exception as e:
-                        print(f"[EXECUTOR] [FAK {fak_attempt}] ❌ EXCEPTION: {e}")
+                        logger.info(f"[EXECUTOR] [FAK {fak_attempt}] ❌ EXCEPTION: {e}")
                     
                     # Delay before next attempt
                     if fak_attempt < SWEEP_FAK_ATTEMPTS and final_balance > MIN_DUST_THRESHOLD:
@@ -1410,11 +1411,11 @@ class OrderExecutor:
                 # Guaranteed sale at any price
                 # ─────────────────────────────────────────────────────
                 if final_balance > MIN_DUST_THRESHOLD:
-                    print(f"\n[EXECUTOR] [FALLBACK MARKET] FAK failed, trying Market order...")
-                    print(f"[EXECUTOR] ⚠️  WARNING: Market order may have high slippage!")
+                    logger.info(f"\n[EXECUTOR] [FALLBACK MARKET] FAK failed, trying Market order...")
+                    logger.info(f"[EXECUTOR] ⚠️  WARNING: Market order may have high slippage!")
                     
                     market_start = time.time()
-                    print(f"\n[EXECUTOR] [MARKET] Selling {final_balance:.2f} @ ${SWEEP_MARKET_PRICE:.2f}...")
+                    logger.info(f"\n[EXECUTOR] [MARKET] Selling {final_balance:.2f} @ ${SWEEP_MARKET_PRICE:.2f}...")
                     
                     # 📝 LOG: Market order attempt
                     log_sell_attempt(
@@ -1428,7 +1429,7 @@ class OrderExecutor:
                     
                     # DRY RUN check
                     if self.safety.dry_run:
-                        print(f"[EXECUTOR] [MARKET] ✓ DRY_RUN: Simulated success")
+                        logger.info(f"[EXECUTOR] [MARKET] ✓ DRY_RUN: Simulated success")
                         total_sold += final_balance
                         total_received_usd += final_balance * SWEEP_MARKET_PRICE
                         final_balance = 0.0
@@ -1448,8 +1449,8 @@ class OrderExecutor:
                             market_elapsed = int((time.time() - market_start) * 1000)
                             
                             # 🔥 DEBUG: Log full API response
-                            print(f"[EXECUTOR] [MARKET] API Response:")
-                            print(f"[EXECUTOR]    Raw: {api_result}")
+                            logger.info(f"[EXECUTOR] [MARKET] API Response:")
+                            logger.info(f"[EXECUTOR]    Raw: {api_result}")
                             
                             if api_result and api_result.get("success"):
                                 taking_amount = float(api_result.get("takingAmount", 0))
@@ -1463,11 +1464,11 @@ class OrderExecutor:
                                     total_sold += filled
                                     total_received_usd += received
                                     
-                                    print(f"[EXECUTOR] [MARKET] ✅ SUCCESS!")
-                                    print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                                    print(f"[EXECUTOR]    Received: ${received:.2f}")
-                                    print(f"[EXECUTOR]    Actual price: ${received/filled:.4f}")
-                                    print(f"[EXECUTOR]    Time: {market_elapsed}ms")
+                                    logger.info(f"[EXECUTOR] [MARKET] ✅ SUCCESS!")
+                                    logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                                    logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
+                                    logger.info(f"[EXECUTOR]    Actual price: ${received/filled:.4f}")
+                                    logger.info(f"[EXECUTOR]    Time: {market_elapsed}ms")
                                     
                                     # Log success
                                     try:
@@ -1483,23 +1484,23 @@ class OrderExecutor:
                                             elapsed_ms=market_elapsed
                                         )
                                     except Exception as log_err:
-                                        print(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
+                                        logger.info(f"[EXECUTOR] ⚠️ Logging error: {log_err}")
                                     
                                     # Final balance check
                                     final_balance = self.get_blockchain_token_balance(token_id)
                                     if final_balance is None:
                                         final_balance = 0.0
                                 else:
-                                    print(f"[EXECUTOR] [MARKET] ❌ NO FILL")
+                                    logger.info(f"[EXECUTOR] [MARKET] ❌ NO FILL")
                             else:
                                 error = api_result.get("errorMsg", "UNKNOWN") if api_result else "NO_API_RESPONSE"
-                                print(f"[EXECUTOR] [MARKET] ❌ FAILED: {error}")
+                                logger.info(f"[EXECUTOR] [MARKET] ❌ FAILED: {error}")
                         
                         except Exception as e:
-                            print(f"[EXECUTOR] [MARKET] ❌ EXCEPTION: {e}")
+                            logger.info(f"[EXECUTOR] [MARKET] ❌ EXCEPTION: {e}")
                 
-                print(f"\n[EXECUTOR] Fallback completed:")
-                print(f"[EXECUTOR]    Final balance: {final_balance:.4f}")
+                logger.info(f"\n[EXECUTOR] Fallback completed:")
+                logger.info(f"[EXECUTOR]    Final balance: {final_balance:.4f}")
         
         # ═══════════════════════════════════════════════════════════
         # 🔥 DELAYED FINAL SWEEP (catch in-flight buys from race conditions)
@@ -1513,27 +1514,27 @@ class OrderExecutor:
         DELAYED_SWEEP_RETRY_DELAY = exec_config.get('delayed_sweep_retry_delay_sec', 1.0)
         
         if DELAYED_SWEEP_ENABLED:
-            print(f"\n[EXECUTOR] {'='*60}")
-            print(f"[EXECUTOR] [DELAYED SWEEP] STAGE 1: WAIT FOR BLOCKCHAIN")
-            print(f"[EXECUTOR] {'='*60}")
-            print(f"[EXECUTOR] [DELAYED SWEEP] Current balance (before wait): {final_balance:.4f}")
-            print(f"[EXECUTOR] [DELAYED SWEEP] ⏰ Waiting {DELAYED_SWEEP_DELAY}s for in-flight purchases...")
-            print(f"[EXECUTOR] [DELAYED SWEEP] (Catching race conditions with blockchain)")
+            logger.info(f"\n[EXECUTOR] {'='*60}")
+            logger.info(f"[EXECUTOR] [DELAYED SWEEP] STAGE 1: WAIT FOR BLOCKCHAIN")
+            logger.info(f"[EXECUTOR] {'='*60}")
+            logger.info(f"[EXECUTOR] [DELAYED SWEEP] Current balance (before wait): {final_balance:.4f}")
+            logger.info(f"[EXECUTOR] [DELAYED SWEEP] ⏰ Waiting {DELAYED_SWEEP_DELAY}s for in-flight purchases...")
+            logger.info(f"[EXECUTOR] [DELAYED SWEEP] (Catching race conditions with blockchain)")
             time.sleep(DELAYED_SWEEP_DELAY)
             
             # Re-fetch balance from blockchain
-            print(f"\n[EXECUTOR] [DELAYED SWEEP] STAGE 2: RE-FETCH BALANCE")
-            print(f"[EXECUTOR] [DELAYED SWEEP] 🔄 Fetching REAL balance from blockchain...")
+            logger.info(f"\n[EXECUTOR] [DELAYED SWEEP] STAGE 2: RE-FETCH BALANCE")
+            logger.info(f"[EXECUTOR] [DELAYED SWEEP] 🔄 Fetching REAL balance from blockchain...")
             delayed_balance = self.get_blockchain_token_balance(token_id)
-            print(f"[EXECUTOR] [DELAYED SWEEP] Balance after re-fetch: {delayed_balance if delayed_balance is not None else 'ERROR'}...")
+            logger.info(f"[EXECUTOR] [DELAYED SWEEP] Balance after re-fetch: {delayed_balance if delayed_balance is not None else 'ERROR'}...")
             
             if delayed_balance is None:
-                print(f"[EXECUTOR] [DELAYED SWEEP] ⚠️  Cannot fetch balance, skipping delayed sweep")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] ⚠️  Cannot fetch balance, skipping delayed sweep")
             elif delayed_balance > DELAYED_SWEEP_MIN_BALANCE:
-                print(f"[EXECUTOR] [DELAYED SWEEP] 🔥 FOUND IN-FLIGHT PURCHASES!")
-                print(f"[EXECUTOR] [DELAYED SWEEP]    Balance: {delayed_balance:.2f} contracts")
-                print(f"[EXECUTOR] [DELAYED SWEEP]    (These appeared AFTER initial sale started)")
-                print(f"\n[EXECUTOR] [DELAYED SWEEP] 🧹 Starting cascade sale (FOK → FAK → Market)...")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] 🔥 FOUND IN-FLIGHT PURCHASES!")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP]    Balance: {delayed_balance:.2f} contracts")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP]    (These appeared AFTER initial sale started)")
+                logger.info(f"\n[EXECUTOR] [DELAYED SWEEP] 🧹 Starting cascade sale (FOK → FAK → Market)...")
                 
                 delayed_sold = 0.0
                 delayed_received = 0.0
@@ -1542,14 +1543,14 @@ class OrderExecutor:
                 # ─────────────────────────────────────────────────────
                 # DELAYED SWEEP #1: FOK attempts
                 # ─────────────────────────────────────────────────────
-                print(f"\n[EXECUTOR] [DELAYED FOK] Attempting FOK orders...")
+                logger.info(f"\n[EXECUTOR] [DELAYED FOK] Attempting FOK orders...")
                 
                 for fok_attempt in range(1, DELAYED_SWEEP_FOK_ATTEMPTS + 1):
                     if delayed_balance < DELAYED_SWEEP_MIN_BALANCE:
                         break
                     
                     fok_start = time.time()
-                    print(f"\n[EXECUTOR] [DELAYED FOK {fok_attempt}/{DELAYED_SWEEP_FOK_ATTEMPTS}] Selling {delayed_balance:.2f} @ ${PRICE:.2f}...")
+                    logger.info(f"\n[EXECUTOR] [DELAYED FOK {fok_attempt}/{DELAYED_SWEEP_FOK_ATTEMPTS}] Selling {delayed_balance:.2f} @ ${PRICE:.2f}...")
                     
                     log_sell_attempt(
                         market_slug=market_slug,
@@ -1561,7 +1562,7 @@ class OrderExecutor:
                     )
                     
                     if self.safety.dry_run:
-                        print(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ✓ DRY_RUN success")
+                        logger.info(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ✓ DRY_RUN success")
                         delayed_sold += delayed_balance
                         delayed_received += delayed_balance * PRICE
                         delayed_balance = 0.0
@@ -1587,9 +1588,9 @@ class OrderExecutor:
                             making_amount = float(api_result.get("makingAmount", 0))
                             
                             if error_msg and ("FOK_ORDER_NOT_FILLED" in error_msg or "not filled" in error_msg.lower()):
-                                print(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ❌ NOT FILLED")
+                                logger.info(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ❌ NOT FILLED")
                             elif taking_amount == 0 or making_amount == 0:
-                                print(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ❌ ZERO FILL")
+                                logger.info(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ❌ ZERO FILL")
                             else:
                                 # ✅ SUCCESS!
                                 filled = making_amount
@@ -1599,9 +1600,9 @@ class OrderExecutor:
                                 delayed_received += received
                                 delayed_success = True
                                 
-                                print(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ✅ SUCCESS!")
-                                print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                                print(f"[EXECUTOR]    Received: ${received:.2f}")
+                                logger.info(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ✅ SUCCESS!")
+                                logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                                logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
                                 
                                 log_sell_result(
                                     market_slug=market_slug,
@@ -1622,7 +1623,7 @@ class OrderExecutor:
                                     break
                     
                     except Exception as e:
-                        print(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ❌ EXCEPTION: {e}")
+                        logger.info(f"[EXECUTOR] [DELAYED FOK {fok_attempt}] ❌ EXCEPTION: {e}")
                     
                     if fok_attempt < DELAYED_SWEEP_FOK_ATTEMPTS and delayed_balance > DELAYED_SWEEP_MIN_BALANCE:
                         time.sleep(DELAYED_SWEEP_RETRY_DELAY)
@@ -1631,14 +1632,14 @@ class OrderExecutor:
                 # DELAYED SWEEP #2: FAK attempts (if FOK failed)
                 # ─────────────────────────────────────────────────────
                 if not delayed_success and delayed_balance > DELAYED_SWEEP_MIN_BALANCE:
-                    print(f"\n[EXECUTOR] [DELAYED FAK] FOK failed, trying FAK orders...")
+                    logger.info(f"\n[EXECUTOR] [DELAYED FAK] FOK failed, trying FAK orders...")
                     
                     for fak_attempt in range(1, DELAYED_SWEEP_FAK_ATTEMPTS + 1):
                         if delayed_balance < DELAYED_SWEEP_MIN_BALANCE:
                             break
                         
                         fak_start = time.time()
-                        print(f"\n[EXECUTOR] [DELAYED FAK {fak_attempt}/{DELAYED_SWEEP_FAK_ATTEMPTS}] Selling {delayed_balance:.2f} @ ${PRICE:.2f}...")
+                        logger.info(f"\n[EXECUTOR] [DELAYED FAK {fak_attempt}/{DELAYED_SWEEP_FAK_ATTEMPTS}] Selling {delayed_balance:.2f} @ ${PRICE:.2f}...")
                         
                         log_sell_attempt(
                             market_slug=market_slug,
@@ -1650,7 +1651,7 @@ class OrderExecutor:
                         )
                         
                         if self.safety.dry_run:
-                            print(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ✓ DRY_RUN success")
+                            logger.info(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ✓ DRY_RUN success")
                             delayed_sold += delayed_balance
                             delayed_received += delayed_balance * PRICE
                             delayed_balance = 0.0
@@ -1683,9 +1684,9 @@ class OrderExecutor:
                                     delayed_received += received
                                     delayed_success = True
                                     
-                                    print(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ✅ SUCCESS!")
-                                    print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                                    print(f"[EXECUTOR]    Received: ${received:.2f}")
+                                    logger.info(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ✅ SUCCESS!")
+                                    logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                                    logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
                                     
                                     log_sell_result(
                                         market_slug=market_slug,
@@ -1705,10 +1706,10 @@ class OrderExecutor:
                                         delayed_balance = 0.0
                                         break
                                 else:
-                                    print(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ❌ NO FILL")
+                                    logger.info(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ❌ NO FILL")
                         
                         except Exception as e:
-                            print(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ❌ EXCEPTION: {e}")
+                            logger.info(f"[EXECUTOR] [DELAYED FAK {fak_attempt}] ❌ EXCEPTION: {e}")
                         
                         if fak_attempt < DELAYED_SWEEP_FAK_ATTEMPTS and delayed_balance > DELAYED_SWEEP_MIN_BALANCE:
                             time.sleep(DELAYED_SWEEP_RETRY_DELAY)
@@ -1717,11 +1718,11 @@ class OrderExecutor:
                 # DELAYED SWEEP #3: Market order (if FAK failed)
                 # ─────────────────────────────────────────────────────
                 if not delayed_success and delayed_balance > DELAYED_SWEEP_MIN_BALANCE:
-                    print(f"\n[EXECUTOR] [DELAYED MARKET] FAK failed, trying Market order...")
-                    print(f"[EXECUTOR] [DELAYED MARKET] ⚠️  WARNING: May have slippage")
+                    logger.info(f"\n[EXECUTOR] [DELAYED MARKET] FAK failed, trying Market order...")
+                    logger.info(f"[EXECUTOR] [DELAYED MARKET] ⚠️  WARNING: May have slippage")
                     
                     market_start = time.time()
-                    print(f"\n[EXECUTOR] [DELAYED MARKET] Selling {delayed_balance:.2f} @ ${PRICE:.2f}...")
+                    logger.info(f"\n[EXECUTOR] [DELAYED MARKET] Selling {delayed_balance:.2f} @ ${PRICE:.2f}...")
                     
                     log_sell_attempt(
                         market_slug=market_slug,
@@ -1733,7 +1734,7 @@ class OrderExecutor:
                     )
                     
                     if self.safety.dry_run:
-                        print(f"[EXECUTOR] [DELAYED MARKET] ✓ DRY_RUN success")
+                        logger.info(f"[EXECUTOR] [DELAYED MARKET] ✓ DRY_RUN success")
                         delayed_sold += delayed_balance
                         delayed_received += delayed_balance * PRICE
                         delayed_balance = 0.0
@@ -1764,9 +1765,9 @@ class OrderExecutor:
                                     delayed_received += received
                                     delayed_success = True
                                     
-                                    print(f"[EXECUTOR] [DELAYED MARKET] ✅ SUCCESS!")
-                                    print(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
-                                    print(f"[EXECUTOR]    Received: ${received:.2f}")
+                                    logger.info(f"[EXECUTOR] [DELAYED MARKET] ✅ SUCCESS!")
+                                    logger.info(f"[EXECUTOR]    Sold: {filled:.2f} contracts")
+                                    logger.info(f"[EXECUTOR]    Received: ${received:.2f}")
                                     
                                     log_sell_result(
                                         market_slug=market_slug,
@@ -1785,36 +1786,36 @@ class OrderExecutor:
                                     if delayed_balance is None:
                                         delayed_balance = 0.0
                                 else:
-                                    print(f"[EXECUTOR] [DELAYED MARKET] ❌ NO FILL")
+                                    logger.info(f"[EXECUTOR] [DELAYED MARKET] ❌ NO FILL")
                         
                         except Exception as e:
-                            print(f"[EXECUTOR] [DELAYED MARKET] ❌ EXCEPTION: {e}")
+                            logger.info(f"[EXECUTOR] [DELAYED MARKET] ❌ EXCEPTION: {e}")
                 
                 # Update totals with delayed sweep results
                 total_sold += delayed_sold
                 total_received_usd += delayed_received
                 final_balance = delayed_balance
                 
-                print(f"\n[EXECUTOR] {'='*60}")
-                print(f"[EXECUTOR] [DELAYED SWEEP] STAGE 3: RESULTS")
-                print(f"[EXECUTOR] {'='*60}")
-                print(f"[EXECUTOR] [DELAYED SWEEP] Additional Sold: {delayed_sold:.2f} contracts")
-                print(f"[EXECUTOR] [DELAYED SWEEP] Additional Received: ${delayed_received:.2f}")
-                print(f"[EXECUTOR] [DELAYED SWEEP] Final Balance: {final_balance:.4f}")
-                print(f"[EXECUTOR] [DELAYED SWEEP] Success: {delayed_success}")
-                print(f"[EXECUTOR] {'='*60}")
+                logger.info(f"\n[EXECUTOR] {'='*60}")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] STAGE 3: RESULTS")
+                logger.info(f"[EXECUTOR] {'='*60}")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] Additional Sold: {delayed_sold:.2f} contracts")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] Additional Received: ${delayed_received:.2f}")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] Final Balance: {final_balance:.4f}")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] Success: {delayed_success}")
+                logger.info(f"[EXECUTOR] {'='*60}")
                 
                 if delayed_sold > 0:
-                    print(f"\n[EXECUTOR] ✅ Delayed sweep caught in-flight purchases!")
-                    print(f"[EXECUTOR]    This proves the race condition fix is working!")
+                    logger.info(f"\n[EXECUTOR] ✅ Delayed sweep caught in-flight purchases!")
+                    logger.info(f"[EXECUTOR]    This proves the race condition fix is working!")
             else:
-                print(f"\n[EXECUTOR] {'='*60}")
-                print(f"[EXECUTOR] [DELAYED SWEEP] STAGE 3: RESULTS")
-                print(f"[EXECUTOR] {'='*60}")
-                print(f"[EXECUTOR] [DELAYED SWEEP] ✓ No additional balance found")
-                print(f"[EXECUTOR] [DELAYED SWEEP]    Balance: {delayed_balance:.4f} (below threshold {DELAYED_SWEEP_MIN_BALANCE})")
-                print(f"[EXECUTOR] [DELAYED SWEEP]    No in-flight purchases detected")
-                print(f"[EXECUTOR] {'='*60}")
+                logger.info(f"\n[EXECUTOR] {'='*60}")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] STAGE 3: RESULTS")
+                logger.info(f"[EXECUTOR] {'='*60}")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP] ✓ No additional balance found")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP]    Balance: {delayed_balance:.4f} (below threshold {DELAYED_SWEEP_MIN_BALANCE})")
+                logger.info(f"[EXECUTOR] [DELAYED SWEEP]    No in-flight purchases detected")
+                logger.info(f"[EXECUTOR] {'='*60}")
                 final_balance = delayed_balance
         
         # ═══════════════════════════════════════════════════════════
@@ -1832,21 +1833,21 @@ class OrderExecutor:
             f"Time: {total_elapsed:.1f}s"
         )
         
-        print(f"\n[EXECUTOR] {'='*60}")
-        print(f"[EXECUTOR] 📊 FOK CHUNKED SELL COMPLETED (FINAL REPORT)")
-        print(f"[EXECUTOR] {'='*60}")
-        print(f"[EXECUTOR] Initial Balance: {initial_balance:.2f}")
-        print(f"[EXECUTOR] Total Sold: {total_sold:.2f} ({total_sold/initial_balance*100:.1f}%)")
-        print(f"[EXECUTOR] Final Balance: {final_balance:.2f}")
-        print(f"[EXECUTOR] ")
-        print(f"[EXECUTOR] Successful Chunks: {successful_chunks}/{len(chunks)}")
-        print(f"[EXECUTOR] Failed Chunks: {len(failed_chunks)}")
-        print(f"[EXECUTOR] ")
-        print(f"[EXECUTOR] Total Received: ${total_received_usd:.2f}")
+        logger.info(f"\n[EXECUTOR] {'='*60}")
+        logger.info(f"[EXECUTOR] 📊 FOK CHUNKED SELL COMPLETED (FINAL REPORT)")
+        logger.info(f"[EXECUTOR] {'='*60}")
+        logger.info(f"[EXECUTOR] Initial Balance: {initial_balance:.2f}")
+        logger.info(f"[EXECUTOR] Total Sold: {total_sold:.2f} ({total_sold/initial_balance*100:.1f}%)")
+        logger.info(f"[EXECUTOR] Final Balance: {final_balance:.2f}")
+        logger.info(f"[EXECUTOR] ")
+        logger.info(f"[EXECUTOR] Successful Chunks: {successful_chunks}/{len(chunks)}")
+        logger.info(f"[EXECUTOR] Failed Chunks: {len(failed_chunks)}")
+        logger.info(f"[EXECUTOR] ")
+        logger.info(f"[EXECUTOR] Total Received: ${total_received_usd:.2f}")
         if total_sold > 0:
-            print(f"[EXECUTOR] Avg Price: ${total_received_usd/total_sold:.4f}")
-        print(f"[EXECUTOR] Total Time: {total_elapsed:.1f}s")
-        print(f"[EXECUTOR] {'='*60}\n")
+            logger.info(f"[EXECUTOR] Avg Price: ${total_received_usd/total_sold:.4f}")
+        logger.info(f"[EXECUTOR] Total Time: {total_elapsed:.1f}s")
+        logger.info(f"[EXECUTOR] {'='*60}\n")
         
         # Check: did significant balance remain? (FINAL check!)
         if final_balance > MIN_DUST_THRESHOLD:
@@ -1868,24 +1869,24 @@ class OrderExecutor:
                 for fc in failed_chunks[:3]:  # Show first 3
                     warning_msg += f"\n  • Chunk {fc['chunk']}: {fc['size']:.2f} (attempts: {fc.get('attempts', '?')})"
             
-            print(f"[EXECUTOR] ⚠️  Sending Telegram alert for FINAL remaining balance...")
+            logger.info(f"[EXECUTOR] ⚠️  Sending Telegram alert for FINAL remaining balance...")
             self._send_telegram_alert(warning_msg)
             
             # Success = False if >10% remains
             success = (final_balance / initial_balance) < 0.1
         else:
-            print(f"[EXECUTOR] ✅ SUCCESS: All sold (remaining = dust)")
+            logger.info(f"[EXECUTOR] ✅ SUCCESS: All sold (remaining = dust)")
             success = True
         
         avg_price = total_received_usd / total_sold if total_sold > 0 else 0.0
         
         # 🔥 FIX 4: Final logging of remaining balance for redeem
         if final_balance > MIN_DUST_THRESHOLD:
-            print(f"\n[EXECUTOR] ⚠️  WARNING: Remaining balance detected!")
-            print(f"[EXECUTOR]    Token: {token_id}")
-            print(f"[EXECUTOR]    Balance: {final_balance:.4f} contracts")
-            print(f"[EXECUTOR]    Market: {market_slug}")
-            print(f"[EXECUTOR]    This market should be added to pending_markets for redeem!")
+            logger.info(f"\n[EXECUTOR] ⚠️  WARNING: Remaining balance detected!")
+            logger.info(f"[EXECUTOR]    Token: {token_id}")
+            logger.info(f"[EXECUTOR]    Balance: {final_balance:.4f} contracts")
+            logger.info(f"[EXECUTOR]    Market: {market_slug}")
+            logger.info(f"[EXECUTOR]    This market should be added to pending_markets for redeem!")
         
         return OrderResult(
             success=success,
@@ -1902,7 +1903,7 @@ class OrderExecutor:
         """
         Send critical notification to Telegram
         """
-        print(f"[EXECUTOR] [TELEGRAM] {message[:100]}...")  # Debug
+        logger.info(f"[EXECUTOR] [TELEGRAM] {message[:100]}...")  # Debug
         try:
             token = os.getenv("TELEGRAM_BOT_TOKEN")
             chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -1917,7 +1918,7 @@ class OrderExecutor:
             }
             requests.post(url, json=payload, timeout=5)
         except Exception as e:
-            print(f"[EXECUTOR] ⚠️ Telegram alert failed: {e}")
+            logger.info(f"[EXECUTOR] ⚠️ Telegram alert failed: {e}")
     
     def _log_order(self, market_slug: str, side: str, contracts: float,
                    price: float, result: OrderResult, order_type: str, fak_attempt: int = 1):
@@ -1965,10 +1966,10 @@ class OrderExecutor:
             (success: bool, amount_usd: float)
         """
         if self.safety.dry_run:
-            print(f"[EXECUTOR] 🟢 DRY_RUN: Would redeem {market_slug}")
+            logger.info(f"[EXECUTOR] 🟢 DRY_RUN: Would redeem {market_slug}")
             return (True, 0.0)
         
-        print(f"[EXECUTOR] 📤 REDEEM: {market_slug}")
+        logger.info(f"[EXECUTOR] 📤 REDEEM: {market_slug}")
         
         # Load redeem config
         redeem_cfg = self.config.get("execution", {}).get("redeem", {})
@@ -1986,7 +1987,7 @@ class OrderExecutor:
             rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
             w3 = Web3(Web3.HTTPProvider(rpc_url))
             if not w3.is_connected():
-                print(f"[REDEEM] ❌ Cannot connect to RPC")
+                logger.info(f"[REDEEM] ❌ Cannot connect to RPC")
                 return False, 0.0
             
             # CTF contract ABI
@@ -2001,15 +2002,15 @@ class OrderExecutor:
             
             # Get wallet address
             wallet_address = self.client.creds.address
-            print(f"[REDEEM] Wallet: {wallet_address}")
+            logger.info(f"[REDEEM] Wallet: {wallet_address}")
             
             # TODO: Complete redeem implementation
             # For now, return success to avoid errors
-            print(f"[REDEEM] ⚠️  Redeem implementation incomplete")
+            logger.info(f"[REDEEM] ⚠️  Redeem implementation incomplete")
             return (True, 0.0)
             
         except Exception as e:
-            print(f"[REDEEM] ❌ Error: {e}")
+            logger.info(f"[REDEEM] ❌ Error: {e}")
             return (False, 0.0)
         """
         Send critical notification to Telegram
@@ -2033,13 +2034,13 @@ class OrderExecutor:
             response = requests.post(url, json=payload, timeout=5)
             
             if response.status_code == 200:
-                print(f"[EXECUTOR] 📱 Telegram alert sent")
+                logger.info(f"[EXECUTOR] 📱 Telegram alert sent")
             else:
-                print(f"[EXECUTOR] ⚠ Telegram alert failed: {response.status_code}")
+                logger.info(f"[EXECUTOR] ⚠ Telegram alert failed: {response.status_code}")
                 
         except Exception as e:
             # Silent fail - don't want Telegram error to break trading
-            print(f"[EXECUTOR] ⚠ Telegram exception: {e}")
+            logger.info(f"[EXECUTOR] ⚠ Telegram exception: {e}")
     
     def _log_order(self, market_slug: str, side: str, contracts: float, 
                    price: float, result: OrderResult, order_type: str, fak_attempt: int = 1):
@@ -2084,7 +2085,7 @@ class OrderExecutor:
             (success: bool, amount_received_usd: float)
         """
         if self.safety.dry_run:
-            print(f"[REDEEM DRY-RUN] Would redeem {market_slug}")
+            logger.info(f"[REDEEM DRY-RUN] Would redeem {market_slug}")
             return True, 0.0
         
         # Load redeem config
@@ -2103,7 +2104,7 @@ class OrderExecutor:
             rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
             w3 = Web3(Web3.HTTPProvider(rpc_url))
             if not w3.is_connected():
-                print(f"[REDEEM] ❌ Cannot connect to RPC")
+                logger.info(f"[REDEEM] ❌ Cannot connect to RPC")
                 return False, 0.0
             
             # CTF contract ABI
@@ -2143,12 +2144,12 @@ class OrderExecutor:
             up_balance = ctf.functions.balanceOf(self.wallet_address, int(up_token_id)).call()
             down_balance = ctf.functions.balanceOf(self.wallet_address, int(down_token_id)).call()
             
-            print(f"[REDEEM] {market_slug}")
-            print(f"  UP: {up_balance / 1e6:.2f}, DOWN: {down_balance / 1e6:.2f}")
+            logger.info(f"[REDEEM] {market_slug}")
+            logger.info(f"  UP: {up_balance / 1e6:.2f}, DOWN: {down_balance / 1e6:.2f}")
             
             if up_balance == 0 and down_balance == 0:
                 self._log_redeem(market_slug, True, 0.0, "", "NO_TOKENS")
-                print(f"[REDEEM] ✅ No tokens to redeem (position already closed or never opened)")
+                logger.info(f"[REDEEM] ✅ No tokens to redeem (position already closed or never opened)")
                 # Return True to indicate completion (not an error requiring retry)
                 return True, 0.0
             
@@ -2158,14 +2159,14 @@ class OrderExecutor:
             
             if payout_denom == 0:
                 self._log_redeem(market_slug, False, 0.0, "", "ORACLE_NOT_RESOLVED")
-                print(f"[REDEEM] ⚠ Oracle not resolved yet (payoutDenominator=0)")
+                logger.info(f"[REDEEM] ⚠ Oracle not resolved yet (payoutDenominator=0)")
                 return False, 0.0
             
             # Check winner
             up_payout = ctf.functions.payoutNumerators(condition_bytes, 0).call()
             down_payout = ctf.functions.payoutNumerators(condition_bytes, 1).call()
             winner = "UP" if up_payout > 0 else "DOWN" if down_payout > 0 else "UNKNOWN"
-            print(f"  Oracle resolved: {winner} won!")
+            logger.info(f"  Oracle resolved: {winner} won!")
             
             # Build redeem transaction
             nonce = w3.eth.get_transaction_count(self.wallet_address)
@@ -2208,8 +2209,8 @@ class OrderExecutor:
                     signed_tx = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
                     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
                     
-                    print(f"  TX: {tx_hash.hex()}")
-                    print(f"  Waiting for confirmation...")
+                    logger.info(f"  TX: {tx_hash.hex()}")
+                    logger.info(f"  Waiting for confirmation...")
                     
                     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
                     
@@ -2218,8 +2219,8 @@ class OrderExecutor:
                         amount_received = (up_balance if up_payout > 0 else down_balance) / 1e6
                         winner = "UP" if up_payout > 0 else "DOWN"
                         self._log_redeem(market_slug, True, amount_received, tx_hash.hex(), f"WINNER_{winner}")
-                        print(f"[REDEEM] ✅ Redeemed ${amount_received:.2f} USDC!")
-                        print(f"[REDEEM] TX Hash: {tx_hash.hex()}")
+                        logger.info(f"[REDEEM] ✅ Redeemed ${amount_received:.2f} USDC!")
+                        logger.info(f"[REDEEM] TX Hash: {tx_hash.hex()}")
                         
                         # Wait 3 seconds before balance update (let blockchain settle)
                         import asyncio
@@ -2233,33 +2234,33 @@ class OrderExecutor:
                             import time
                             time.sleep(3)
                         
-                        print(f"[REDEEM] 🔄 Checking balance after 3s delay...")
+                        logger.info(f"[REDEEM] 🔄 Checking balance after 3s delay...")
                         
                         # Refresh balance from blockchain for exact amount
                         try:
                             updated_balance = self.get_wallet_usdc_balance()
                             
                             if updated_balance is not None and updated_balance > 0:
-                                print(f"[REDEEM] 💰 Blockchain balance refreshed: ${updated_balance:.2f}")
+                                logger.info(f"[REDEEM] 💰 Blockchain balance refreshed: ${updated_balance:.2f}")
                                 
                                 # Update local balance with exact value from blockchain
                                 if self.balance_change_callback:
                                     self.balance_change_callback(updated_balance, "REDEEM_REFRESH", is_absolute=True)
-                                    print(f"[REDEEM] ✅ Balance callback called with ${updated_balance:.2f}")
+                                    logger.info(f"[REDEEM] ✅ Balance callback called with ${updated_balance:.2f}")
                             else:
-                                print(f"[REDEEM] ⚠️ Blockchain query returned None/0, using local update")
+                                logger.info(f"[REDEEM] ⚠️ Blockchain query returned None/0, using local update")
                                 # Fallback to local update
                                 if self.balance_change_callback:
                                     self.balance_change_callback(+amount_received, "REDEEM")
-                                    print(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f}")
+                                    logger.info(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f}")
                         except Exception as e:
-                            print(f"[REDEEM] ⚠️ Failed to refresh balance: {e}")
+                            logger.info(f"[REDEEM] ⚠️ Failed to refresh balance: {e}")
                             import traceback
                             traceback.print_exc()
                             # Fallback to local update
                             if self.balance_change_callback:
                                 self.balance_change_callback(+amount_received, "REDEEM")
-                                print(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f} (fallback)")
+                                logger.info(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f} (fallback)")
                         
                         # 🔥 UNBLOCK MARKET after successful redeem (per-coin)
                         # Extract coin from market_slug (e.g., "btc-updown-15m-..." → "btc")
@@ -2271,14 +2272,14 @@ class OrderExecutor:
                         
                         if coin:
                             OrderExecutor.unblock_market(market_slug, coin)
-                            print(f"[REDEEM] 🔓 Market unblocked for {coin.upper()}")
+                            logger.info(f"[REDEEM] 🔓 Market unblocked for {coin.upper()}")
                         else:
-                            print(f"[REDEEM] ⚠️ Could not determine coin from slug: {market_slug}")
+                            logger.info(f"[REDEEM] ⚠️ Could not determine coin from slug: {market_slug}")
                         
                         return True, amount_received
                     else:
                         self._log_redeem(market_slug, False, 0.0, tx_hash.hex(), "TX_REVERTED")
-                        print(f"[REDEEM] ❌ TX reverted")
+                        logger.info(f"[REDEEM] ❌ TX reverted")
                         return False, 0.0
                 
                 except Exception as send_error:
@@ -2287,8 +2288,8 @@ class OrderExecutor:
                     # Check if it's the specific gas price error we want to retry
                     if 'replacement transaction underpriced' in error_str:
                         if retry_attempt < max_gas_retries:
-                            print(f"[REDEEM] ⚠️ Gas price too low (attempt {retry_attempt}/{max_gas_retries})")
-                            print(f"[REDEEM] 🔄 Retrying in {gas_retry_delay}s with higher gas...")
+                            logger.info(f"[REDEEM] ⚠️ Gas price too low (attempt {retry_attempt}/{max_gas_retries})")
+                            logger.info(f"[REDEEM] 🔄 Retrying in {gas_retry_delay}s with higher gas...")
                             
                             import time
                             time.sleep(gas_retry_delay)
@@ -2331,7 +2332,7 @@ class OrderExecutor:
                             
                             continue  # Try again with new gas price
                         else:
-                            print(f"[REDEEM] ❌ Failed after {max_gas_retries} gas price retries")
+                            logger.info(f"[REDEEM] ❌ Failed after {max_gas_retries} gas price retries")
                             self._log_redeem(market_slug, False, 0.0, "", f"ERROR: {error_str[:100]}")
                             return False, 0.0
                     else:
@@ -2340,7 +2341,7 @@ class OrderExecutor:
                 
         except Exception as e:
             self._log_redeem(market_slug, False, 0.0, "", f"ERROR: {str(e)[:100]}")
-            print(f"[REDEEM] ❌ Error: {e}")
+            logger.info(f"[REDEEM] ❌ Error: {e}")
             import traceback
             logging.exception("Exception occurred")
             return False, 0.0

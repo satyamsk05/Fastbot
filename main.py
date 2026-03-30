@@ -21,6 +21,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dotenv import load_dotenv
 
+from utils.gsd_logger import setup_gsd_logging, get_gsd_logger, stop_gsd_logging, log_audit
+
+# ── setup logging ─────────────────────────────────────────────────────────────
+# Initialize centralized, queue-based logging BEFORE other imports if possible
+setup_gsd_logging()
+logger = get_gsd_logger("SYS")
+
 load_dotenv()
 
 SRC_DIR = Path(__file__).parent
@@ -59,29 +66,13 @@ DASHBOARD_REFRESH = 1.0
 VBAL_START        = 500.0
 BET_MIN_FUNDS     = 3.0
 
-# ── dirs + logging ────────────────────────────────────────────────────────────
+# ── dirs ──────────────────────────────────────────────────────────────────────
 for d in ("logs","data","history"):
     os.makedirs(d, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("logs/bot.log")],
-)
-for lib in ("urllib3","requests","httpx","telegram","apscheduler"):
-    logging.getLogger(lib).setLevel(logging.WARNING)
-
 def get_coin_logger(coin: str):
     """Returns a thread-safe logger for a specific coin."""
-    logger = logging.getLogger(coin.upper())
-    if not logger.handlers:
-        path = f"logs/{coin.upper()}.log"
-        handler = logging.FileHandler(path)
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False # don't send to root bot.log
-    return logger
+    return get_gsd_logger(coin.upper())
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
@@ -703,9 +694,20 @@ def main():
         data_feed.stop()
         try: os.remove(pid_file)
         except: pass
+        stop_gsd_logging()
         sys.exit(0)
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
+
+    # Custom log bridge to dashboard
+    class DashHandler(logging.Handler):
+        def emit(self, record):
+            try: dash.log(self.format(record))
+            except: pass
+    
+    dash_h = DashHandler()
+    dash_h.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(dash_h)
 
     # Telegram startup
     notifier.notify_startup(ACTIVE_COINS, DRY_RUN)
@@ -745,34 +747,34 @@ def main():
     procs = {c: CoinProc(c) for c in ACTIVE_COINS}
 
     # Main loop with parallel coin processing
-    print("[SYSTEM] Running (parallel). Ctrl+C to stop.")
-    with ThreadPoolExecutor(max_workers=len(ACTIVE_COINS)) as executor:
-        while not _stop.is_set():
-            now = int(time.time())
-            if _paused.is_set():
+    with dash.live_context():
+        logger.info("System Running (parallel)")
+        with ThreadPoolExecutor(max_workers=len(ACTIVE_COINS)) as executor:
+            while not _stop.is_set():
+                now = int(time.time())
+                if _paused.is_set():
+                    time.sleep(1)
+                    continue
+
+                # Run p.tick(now) for all coins in parallel
+                sigs = []
+                futures = {executor.submit(p.tick, now): c for c, p in procs.items()}
+                
+                for f in futures:
+                    coin = futures[f]
+                    try:
+                        s = f.result()
+                        if s: sigs.append(s)
+                    except Exception as e:
+                        logger.error(f"[{coin}] Parallel tick error: {e}")
+                
+                if sigs:
+                    try:
+                        _pick_and_place(sigs, notifier, data_feed)
+                    except Exception as e:
+                        logger.error(f"[PICK] {e}")
+
                 time.sleep(1)
-                continue
-
-            # Run p.tick(now) for all coins in parallel
-            sigs = []
-            futures = {executor.submit(p.tick, now): c for c, p in procs.items()}
-            
-            for f in futures:
-                coin = futures[f]
-                try:
-                    s = f.result()
-                    if s: sigs.append(s)
-                except Exception as e:
-                    logging.error(f"[{coin}] Parallel tick error: {e}")
-                    dash.log_error(f"{coin}: {e}")
-
-            if sigs:
-                try:
-                    _pick_and_place(sigs, notifier, data_feed)
-                except Exception as e:
-                    logging.error(f"[PICK] {e}")
-
-            time.sleep(1)
 
 
 if __name__ == "__main__":
@@ -781,3 +783,4 @@ if __name__ == "__main__":
     finally:
         try: os.remove("data/bot.pid")
         except: pass
+        stop_gsd_logging()
