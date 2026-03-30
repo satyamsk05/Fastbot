@@ -23,3 +23,5 @@ Thumbs.db
 
 # ── Lock files ────────────────────────────────────────────────
 *.lock
+.gsd/
+get-shit-done-for-antigravity/
