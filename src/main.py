@@ -579,6 +579,8 @@ def main():
             }
         }
     })
+    data_feed.start()
+    
     # Wire telegram callbacks 
     tg_bot.active_coins = ACTIVE_COINS
     tg_bot.get_balance = get_wallet_balance
