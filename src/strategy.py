@@ -220,6 +220,7 @@ class StreakReversalStrategy:
             "closes":    closes,
             "coin":      coin.upper(),
             "ts":        ts,
+            "ts_sig":    time.time(), # Added: creation timestamp for latency tracking
         }
 
     def on_result(self, coin: str, won: bool):

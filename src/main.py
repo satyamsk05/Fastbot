@@ -420,73 +420,78 @@ class CoinProc:
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL PICKER  (random, recovery priority)
 # ═══════════════════════════════════════════════════════════════════════════════
-def _pick_and_place(signals: List[Dict], notifier, data_feed):
+def _execute_signals(signals: List[Dict], notifier, data_feed):
     if not signals:
         return
 
-    # Recovery coins (step>0) have priority
-    recovery = [s for s in signals if s["step"] > 0]
-    chosen   = random.choice(recovery) if recovery else random.choice(signals)
+    def _execute_one(chosen):
+        coin      = chosen["coin"]
+        direction = chosen["direction"]
+        amount    = chosen["amount"]
+        step      = chosen["step"]
+        token_id  = chosen["yes_token"] if direction == "YES" else chosen["no_token"]
 
-    coin      = chosen["coin"]
-    direction = chosen["direction"]
-    amount    = chosen["amount"]
-    step      = chosen["step"]
-    token_id  = chosen["yes_token"] if direction == "YES" else chosen["no_token"]
+        # ── Latency Logging ──
+        ts_sig = chosen.get("ts_sig", time.time())
+        latency_ms = int((time.time() - ts_sig) * 1000)
+        logger.info(f"[{coin}] ⏱️ Signal latency: {latency_ms}ms")
 
-    # Balance check
-    bal = get_wallet_balance()
-    if bal < max(amount, BET_MIN_FUNDS):
-        notifier.notify_insufficient_funds(coin, bal, amount)
-        return
-
-    # Notify signal
-    # notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
-
-    # Already has pending?
-    with _plock:
-        if _pending.get(coin) is not None:
-            get_coin_logger(coin).info("Skip — already pending")
+        # Balance check
+        bal = get_wallet_balance()
+        if bal < max(amount, BET_MIN_FUNDS):
+            notifier.notify_insufficient_funds(coin, bal, amount)
             return
 
-    # ── FIXED: Fetch live market price from feed ──
-    try:
-        st = data_feed.get_state(coin.lower())
-        if st:
-            # We want current ask price for the token we are buying
-            price = st["up_ask"] if direction == "YES" else st["down_ask"]
-            if not price or price <= 0:
-                price = 0.50 # fallback
-        else:
-            price = 0.50 # fallback
-    except Exception:
-        price = 0.50 # fallback
-
-    # ── FIXED: Price bracket to avoid outliers ──
-    if step == 0:
-        price = max(0.35, min(price, 0.65))  # L1 bracket: 35c to 65c
-    else:
-        price = max(0.45, min(price, 0.51))  # L2-L5 bracket: 45c to 51c (Updated)
-
-    ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
-
-    if ok:
-        if DRY_RUN:
-            _vbal_write(_vbal_read() - amount)
-        hm.log_bet_placed(coin, direction, amount, price, ot, step,
-                          chosen["active_ts"], token_id, is_dry_run=DRY_RUN)
-        hm.open_position(coin, direction, amount, price, chosen["active_ts"], token_id)
+        # Already has pending?
         with _plock:
-            _pending[coin] = {
-                "direction": direction, "amount": amount, "step": step,
-                "ts": chosen["active_ts"],
-                "yes_token": chosen["yes_token"],
-                "no_token":  chosen["no_token"],
-                "token_id":  token_id, "price": price,
-            }
-        notifier.notify_trade_placed(coin, direction, amount, price, ot, step)
-    else:
-        notifier.notify_error(f"{coin} order", "Placement failed")
+            if _pending.get(coin) is not None:
+                get_coin_logger(coin).info("Skip — already pending")
+                return
+
+        # ── Fetch live market price from feed ──
+        try:
+            st = data_feed.get_state(coin.lower())
+            if st:
+                price = st["up_ask"] if direction == "YES" else st["down_ask"]
+                if not price or price <= 0: price = 0.50
+            else: price = 0.50
+        except Exception: price = 0.50
+
+        # ── Price bracket to avoid outliers ──
+        if step == 0:
+            price = max(0.35, min(price, 0.65))
+        else:
+            price = max(0.45, min(price, 0.51))
+
+        ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
+
+        if ok:
+            if DRY_RUN:
+                _vbal_write(_vbal_read() - amount)
+            hm.log_bet_placed(coin, direction, amount, price, ot, step,
+                              chosen["ts"], token_id, is_dry_run=DRY_RUN)
+            hm.open_position(coin, direction, amount, price, chosen["ts"], token_id)
+            with _plock:
+                _pending[coin] = {
+                    "direction": direction, "amount": amount, "step": step,
+                    "ts": chosen["ts"],
+                    "yes_token": chosen["yes_token"],
+                    "no_token":  chosen["no_token"],
+                    "token_id":  token_id, "price": price,
+                }
+            notifier.notify_trade_placed(coin, direction, amount, price, ot, step)
+            
+            # Post-trade latency
+            final_ms = int((time.time() - ts_sig) * 1000)
+            logger.info(f"[{coin}] ✅ Trade placed in {final_ms}ms total")
+        else:
+            notifier.notify_error(f"{coin} order", "Placement failed")
+
+    # 🔥 PARALLEL EXECUTION for multiple signals
+    with ThreadPoolExecutor(max_workers=len(signals)) as executor:
+        executor.map(_execute_one, signals)
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -742,13 +747,13 @@ def main():
                 
                 if sigs:
                     try:
-                        _pick_and_place(sigs, notifier, data_feed)
+                        _execute_signals(sigs, notifier, data_feed)
                     except Exception as e:
-                        logger.error(f"[PICK] {e}")
+                        logger.error(f"[EXECUTE] {e}")
 
                 # Heartbeat and Health
                 set_health_state(ws_connected=data_feed.is_alive())
-                time.sleep(1)
+                time.sleep(0.2) # Faster heartbeat for sub-second precision
 
 
 if __name__ == "__main__":
