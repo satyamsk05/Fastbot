@@ -1,8 +1,8 @@
 # 💎 Polymarket Streak-Reversal Martingale Bot v2.1
 
-[![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen)](https://github.com/satyamsk05/2in)
-[![Version](https://img.shields.io/badge/Version-2.1.0-blue)](https://github.com/satyamsk05/2in)
-[![Strategy](https://img.shields.io/badge/Strategy-Martingale--Reversal-orange)](https://github.com/satyamsk05/2in)
+[![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen)](https://github.com/satyamsk05/5in)
+[![Version](https://img.shields.io/badge/Version-2.1.0-blue)](https://github.com/satyamsk05/5in)
+[![Strategy](https://img.shields.io/badge/Strategy-Martingale--Reversal-orange)](https://github.com/satyamsk05/5in)
 
 A high-performance, multi-market trading suite for Polymarket. This bot combines **ultra-low latency data infrastructure** with a refined **streak-reversal strategy** for **5-minute price markets**.
 
@@ -39,7 +39,7 @@ A full-featured 3x3 menu for mobile management:
 ## 🏗️ Architecture
 
 ```
-2in/
+5in/
 ├── src/
 │   ├── main.py                # Core execution loop (Parallel)
 │   ├── data_feed.py           # Multi-market WebSocket client
@@ -67,8 +67,8 @@ A full-featured 3x3 menu for mobile management:
 
 ### 2. Quick Start
 ```bash
-git clone https://github.com/satyamsk05/2in.git
-cd 2in
+git clone https://github.com/satyamsk05/5in.git
+cd 5in
 
 # Setup Environment
 python3 -m venv venv
@@ -90,7 +90,7 @@ python3 run.py
 
 ## 📊 Strategy: Martingale Streak-Reversal
 
-The bot monitors 15-minute price boundaries:
+The bot monitors 5-minute price boundaries:
 1. **Streak Detection**: If the last 3 closes are in the same direction (e.g., all 🟢 or all 🔴), the bot signals a **Reversal**.
 2. **Order Execution**:
    - **Level 1**: Market-fill (FOK) at the start of a streak.
