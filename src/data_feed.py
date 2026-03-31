@@ -202,7 +202,8 @@ class DataFeed:
                 'market_slug': market.get('slug', ''),
                 'confidence': confidence,
                 'last_msg_time': market.get('last_msg_time', 0.0),
-                'coin': coin
+                'coin': coin,
+                'tokens': market.get('tokens', {})
             }
     
     def register_price_callback(self, callback):

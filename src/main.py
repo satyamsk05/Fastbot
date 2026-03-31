@@ -264,7 +264,7 @@ class CoinProc:
         self.warmup = 0
         self.log = get_coin_logger(coin)
 
-    def tick(self, now: int) -> Optional[Dict]:
+    def tick(self, now: int, data_feed=None) -> Optional[Dict]:
         """Run every second. Returns signal dict or None."""
         boundary   = (now // INTERVAL_SEC) * INTERVAL_SEC
         since      = now - boundary
@@ -316,10 +316,27 @@ class CoinProc:
         if sig is None:
             return None
 
-        # 5. Fetch active market tokens
-        active_tkns = _tokens(coin, boundary)
+        # 5. Fetch active market tokens (from cache to avoid latency)
+        active_tkns = None
+        if data_feed:
+            df_st = data_feed.get_state(coin.lower())
+            if df_st and df_st.get("tokens"):
+                t = df_st["tokens"]
+                # Verify it matches the current slot
+                if df_st.get("market_slug", "").endswith(str(boundary)):
+                    active_tkns = {
+                        "yes_token": t.get("up"),
+                        "no_token": t.get("down"),
+                        "condition_id": t.get("condition_id", ""),
+                        "slug": df_st.get("market_slug", "")
+                    }
+        
+        # Fallback if cache misses
         if not active_tkns:
-            self.log.warning("No active market")
+            active_tkns = _tokens(coin, boundary)
+            
+        if not active_tkns:
+            self.log.warning("No active market tokens found")
             return None
 
         sig["active_ts"]    = boundary
@@ -735,7 +752,7 @@ def main():
 
                 # Run p.tick(now) for all coins in parallel
                 sigs = []
-                futures = {executor.submit(p.tick, now): c for c, p in procs.items()}
+                futures = {executor.submit(p.tick, now, data_feed): c for c, p in procs.items()}
                 
                 for f in futures:
                     coin = futures[f]
