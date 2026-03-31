@@ -4,7 +4,7 @@
 [![Version](https://img.shields.io/badge/Version-2.1.0-blue)](https://github.com/satyamsk05/2in)
 [![Strategy](https://img.shields.io/badge/Strategy-Martingale--Reversal-orange)](https://github.com/satyamsk05/2in)
 
-A high-performance, multi-market trading suite for Polymarket. This bot combines **4coinsbot's** ultra-low latency data infrastructure with a refined **streak-reversal strategy** for 15-minute price markets.
+A high-performance, multi-market trading suite for Polymarket. This bot combines **ultra-low latency data infrastructure** with a refined **streak-reversal strategy** for **5-minute price markets**.
 
 ---
 
@@ -15,11 +15,12 @@ Processes **BTC, ETH, SOL, and XRP** markets simultaneously using a threaded Web
 - **Zero Sequential Delay**: Signals are evaluated and orders placed across all markets in parallel.
 - **WebSocket Health Watchdog**: Automatic re-connection and staleness detection for 24/7 uptime.
 
-### 🛡️ Production Monitoring & Self-Recovery
+### 🛡️ Production Monitoring & Resilience
 Hardened for 24/7 unattended operation:
+- **Redundant RPCs**: Intelligent failover system with parallel nodes to guarantee blockchain read/write integrity even during Polygon network congestion.
 - **Watchdog Supervisor**: The `run.py` launcher monitors the bot process and performs auto-restarts upon crash (including OOM or network failures).
-- **Centralized Logging**: Thread-safe, non-blocking queue-based logging (`gsd_logger.py`) for clean terminal outputs.
-- **Metrics JSON Exporter**: Real-time health, PnL, and balance data exported to `data/metrics.json` for external monitoring.
+- **Telegram Watchdog Alerts**: Critical stall detections instantly notify the user to take action.
+- **Discrete PnL Tracking**: Accurate separation of Live (Real) vs Dry Run (Virtual) performance metrics.
 
 ### 🍱 High-Fidelity Terminal Dashboard
 A premium, scroll-free terminal interface using `Rich`:
@@ -102,9 +103,9 @@ The bot monitors 15-minute price boundaries:
 
 ## 💡 Troubleshooting & FAQs
 
-- **Balance Discrepancy**: The bot automatically aggregates both Native USDC and USDC.e (bridged) for real balance reporting.
-- **Zombie Positions**: Hardened logic in Phase 7 automatically force-resolves "stuck" positions after 2 intervals (30 minutes) to prevent Martingale stalls.
-- **No Trend Data**: Data resets on startup for session purity. After 15 minutes, the first candle will appear.
+- **Balance Discrepancy**: The bot automatically aggregates both Native USDC and USDC.e (bridged) for real balance reporting using redundant nodes.
+- **Data Stall Alerts**: If the bot hasn't received a WebSocket push from Polymarket in >30s, the connection is instantly refreshed and a Telegram alert is sent.
+- **No Trend Data**: Data resets on startup for session purity. After 5 minutes, the first candle will appear.
 
 ---
 
