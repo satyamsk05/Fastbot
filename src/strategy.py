@@ -123,7 +123,7 @@ class Martingale:
 class CandleStore:
     """
     Stores last-trade-price candle closes per coin/interval.
-    One entry per market boundary (15-min slot).
+    One entry per market boundary (5-min slot).
     """
 
     def __init__(self, path: str = CANDLE_FILE):
@@ -186,7 +186,7 @@ def check_streak_signal(closes: List[float]) -> Optional[str]:
 class StreakReversalStrategy:
     """
     Wraps signal detection + Martingale sizing.
-    Called once per 15-min candle boundary per coin.
+    Called once per 5-min candle boundary per coin.
     """
 
     def __init__(self):
@@ -195,7 +195,7 @@ class StreakReversalStrategy:
 
     def on_candle_close(self, coin: str, ts: int, close_price: float) -> Optional[Dict]:
         """
-        Call at every 15-min boundary after price settles.
+        Call at every 5-min boundary after price settles.
         Returns signal dict or None.
 
         Signal dict:

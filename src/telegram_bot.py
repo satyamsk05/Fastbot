@@ -180,7 +180,7 @@ class TelegramBot:
             st = states.get(coin, {})
             up = st.get("up_ask", 0.0)
             dn = st.get("down_ask", 0.0)
-            rem_sec = st.get("seconds_till_end", 900)
+            rem_sec = st.get("seconds_till_end", 300)
             
             lines.append(f"🌟 *{coin}*")
             lines.append(f"  🟢 *YES:* *${up:.2f}*  |  🔴 *NO:* *${dn:.2f}*")
@@ -418,6 +418,13 @@ class TelegramNotifier:
         self.send(_box(f"📊 RESULT: {coin}", [
             f"*State:* *{status}*",
             f"*PnL:*   *{'+' if pnl>=0 else ''}${pnl:.2f}*"
+        ]))
+
+    def notify_error(self, title: str, details: str):
+        """Send a critical error alert."""
+        self.send(_box(f"🚨 ALERT: {title}", [
+            f"*Details:* *{details}*",
+            f"*Time:*    *{datetime.now().strftime('%H:%M:%S')}*"
         ]))
 
 # Singleton getters

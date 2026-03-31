@@ -2,6 +2,7 @@
 Multi-Market data feed: Polymarket orderbook for 4 coins
 """
 from utils.gsd_logger import get_gsd_logger
+from telegram_bot import get_notifier
 logger = get_gsd_logger("FEED")
 import json
 import time
@@ -49,8 +50,8 @@ class DataFeed:
                 'up_asks_full': [],  # Top 1 ask level
                 'down_asks_full': [],  # Top 1 ask level
                 'tokens': {},
-                'seconds_till_end': 900,
-                'market_end_time': int(time.time()) + 900,
+                'seconds_till_end': 300,
+                'market_end_time': int(time.time()) + 300,
                 'market_start_price': 0.0,
                 'last_msg_time': time.time()  # ✅ Added
             },
@@ -69,8 +70,8 @@ class DataFeed:
                 'up_asks_full': [],
                 'down_asks_full': [],
                 'tokens': {},
-                'seconds_till_end': 900,
-                'market_end_time': int(time.time()) + 900,
+                'seconds_till_end': 300,
+                'market_end_time': int(time.time()) + 300,
                 'market_start_price': 0.0,
                 'last_msg_time': time.time()  # ✅ Added
             },
@@ -89,8 +90,8 @@ class DataFeed:
                 'up_asks_full': [],
                 'down_asks_full': [],
                 'tokens': {},
-                'seconds_till_end': 900,
-                'market_end_time': int(time.time()) + 900,
+                'seconds_till_end': 300,
+                'market_end_time': int(time.time()) + 300,
                 'market_start_price': 0.0, # Not used for SOL (no price feed)
                 'last_msg_time': time.time()  # ✅ Added: Track WebSocket health
             },
@@ -109,8 +110,8 @@ class DataFeed:
                 'up_asks_full': [],
                 'down_asks_full': [],
                 'tokens': {},
-                'seconds_till_end': 900,
-                'market_end_time': int(time.time()) + 900,
+                'seconds_till_end': 300,
+                'market_end_time': int(time.time()) + 300,
                 'market_start_price': 0.0,
                 'last_msg_time': time.time()  # Track WebSocket health
             }
@@ -152,8 +153,13 @@ class DataFeed:
         watchdog_thread = threading.Thread(target=self._watchdog_worker, daemon=True)
         watchdog_thread.start()
         self.threads.append(watchdog_thread)
-        
-        logger.info("[DATA] All feeds started: 4 Polymarket orderbooks + Watchdog")
+
+        # Start timer thread for live countdowns
+        timer_thread = threading.Thread(target=self._timer_worker, daemon=True)
+        timer_thread.start()
+        self.threads.append(timer_thread)
+
+        logger.info("[DATA] All feeds started: 4 Polymarket orderbooks + Watchdog + Timer")
     
     def stop(self):
         """Stop all data streams"""
@@ -205,8 +211,8 @@ class DataFeed:
     
     def _current_slug(self, coin: str) -> str:
         """Calculate current market slug for specified coin"""
-        current_slot = int(time.time()) // 900 * 900
-        return f"{coin}-updown-15m-{current_slot}"
+        current_slot = int(time.time()) // 300 * 300
+        return f"{coin}-updown-5m-{current_slot}"
     
     def _fetch_tokens(self, coin: str) -> Optional[Dict]:
         """Fetch current market tokens from Polymarket for specified coin"""
@@ -223,7 +229,7 @@ class DataFeed:
             if not events:
                 # Market not found - may not be open yet
                 current_time = int(time.time())
-                next_market = ((current_time // 900) + 1) * 900
+                next_market = ((current_time // 300) + 1) * 300
                 wait_time = next_market - current_time
                 logger.info(f"[PM-{coin.upper()}] Market {slug} not found (may not be open yet, next in {wait_time}s)")
                 return None
@@ -280,7 +286,7 @@ class DataFeed:
             
             # Calculate reconnect time
             current_time = int(time.time())
-            market_end = ((current_time // 900) * 900) + 900
+            market_end = ((current_time // 300) * 300) + 300
             reconnect_in = market_end - current_time + 2
             
             # Get market slug
@@ -554,7 +560,14 @@ class DataFeed:
                     last_msg = self.markets[coin].get('last_msg_time', 0.0)
                     # Don't stall if we just started (wait at least STALL_THRESHOLD)
                     if last_msg > 0 and (now - last_msg > STALL_THRESHOLD):
-                        logger.info(f"[WATCHDOG] 🚨 Data stall on {coin.upper()}! (No msg for {int(now-last_msg)}s). Reconnecting...")
+                        msg = f"Data stall on {coin.upper()}! (No msg for {int(now-last_msg)}s). Reconnecting..."
+                        logger.info(f"[WATCHDOG] 🚨 {msg}")
+                        
+                        # Notify user via Telegram
+                        try:
+                            get_notifier().notify_error(f"{coin.upper()} Stall", msg)
+                        except: pass
+                        
                         # Reset timestamp to avoid double-triggers
                         self.markets[coin]['last_msg_time'] = now
                         ws = self.markets[coin].get('ws')

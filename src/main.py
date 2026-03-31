@@ -4,7 +4,7 @@
 ║   Polymarket Streak-Reversal Martingale Bot  v2.0        ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Coins    : BTC · ETH · SOL · XRP (configurable)        ║
-║  Interval : 15-minute markets                            ║
+║  Interval : 5-minute markets                            ║
 ║  Signal   : 3+ same-dir closes → reverse bet            ║
 ║  Ladder   : $3 → $6 → $13 → $28 → $60 USDC             ║
 ╠══════════════════════════════════════════════════════════╣
@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from utils.gsd_logger import setup_gsd_logging, get_gsd_logger, stop_gsd_logging, log_audit
 from utils.metrics_manager import init_metrics, update_metric, increment_trade, set_health_state, stop_metrics
+from order_executor import get_executor
 
 # ── setup logging ─────────────────────────────────────────────────────────────
 # Initialize centralized, queue-based logging BEFORE other imports if possible
@@ -61,7 +62,7 @@ COINS_ENABLED = {
 }
 ACTIVE_COINS = [c for c, v in COINS_ENABLED.items() if v]
 
-INTERVAL_SEC      = 15 * 60
+INTERVAL_SEC      = 5 * 60
 CANDLE_SETTLE     = 5          # wait N sec after boundary before fetching price
 DASHBOARD_REFRESH = 1.0
 VBAL_START        = 500.0
@@ -116,55 +117,11 @@ def get_wallet_balance() -> float:
     return get_real_balance()
 
 def get_real_balance() -> float:
+    """Uses redundant OrderExecutor check."""
     try:
-        from web3 import Web3
-        from eth_account import Account
-        from web3.middleware import ExtraDataToPOAMiddleware
-        
-        w3 = Web3(Web3.HTTPProvider(RPC_URL))
-        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        if not w3.is_connected():
-            logging.warning("[BAL] Web3 not connected")
-            return 0.0
-            
-        wallet = FUNDER_ADDRESS or WALLET_ADDRESS
-        if not wallet and PRIVATE_KEY:
-            try:
-                wallet = Account.from_key(PRIVATE_KEY).address
-            except: pass
-        
-        if not wallet:
-            return 0.0
-            
-        addr = w3.to_checksum_address(wallet)
-        logging.info(f"[BAL] Checking balance for: {addr}")
-        
-        # USDC contracts
-        USDCE_ADDR = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" # USDC.e
-        USDCN_ADDR = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" # Native USDC
-        
-        abi  = [{"constant":True,"inputs":[{"name":"_owner","type":"address"}],
-                 "name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],
-                 "type":"function"}]
-        
-        total_raw = 0
-        try:
-            val_e = w3.eth.contract(address=w3.to_checksum_address(USDCE_ADDR), abi=abi).functions.balanceOf(addr).call()
-            if val_e > 0: logging.info(f"[BAL] Found {val_e/1e6} USDC.e")
-            total_raw += val_e
-        except Exception as e: logging.debug(f"[BAL] USDC.e Error: {e}")
-        
-        try:
-            val_n = w3.eth.contract(address=w3.to_checksum_address(USDCN_ADDR), abi=abi).functions.balanceOf(addr).call()
-            if val_n > 0: logging.info(f"[BAL] Found {val_n/1e6} Native USDC")
-            total_raw += val_n
-        except Exception as e: logging.debug(f"[BAL] USDC.n Error: {e}")
-        
-        final = round(total_raw / 1_000_000, 2)
-        update_metric("balances", "usdc", final)
-        return final
+        return get_executor().get_wallet_usdc_balance() or 0.0
     except Exception as e:
-        logging.error(f"[BAL] Critical Error: {e}")
+        logging.error(f"[BAL] Redundant check failed: {e}")
         return 0.0
 
 def get_in_bets() -> float:
@@ -174,7 +131,7 @@ def get_in_bets() -> float:
 # MARKET DATA
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tokens(coin: str, ts: int) -> Optional[Dict]:
-    slug = f"{coin.lower()}-updown-15m-{ts}"
+    slug = f"{coin.lower()}-updown-5m-{ts}"
     url  = f"https://gamma-api.polymarket.com/events?slug={slug}"
     try:
         r = requests.get(url, timeout=10)
@@ -403,8 +360,8 @@ class CoinProc:
                 _strat.on_result(coin, won)
                 hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
                 hm.close_position(coin)
-                hm.record_pnl(pnl)
-                hm.record_fee(fee)
+                hm.record_pnl(pnl, is_dry_run=DRY_RUN)
+                hm.record_fee(fee, is_dry_run=DRY_RUN)
                 get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
                 
                 with _tlock:
@@ -431,17 +388,19 @@ class CoinProc:
         _strat.on_result(coin, won)
         hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
         hm.close_position(coin)
-        hm.record_pnl(pnl)
-        hm.record_fee(fee)
+        hm.record_pnl(pnl, is_dry_run=DRY_RUN)
+        hm.record_fee(fee, is_dry_run=DRY_RUN)
 
         if DRY_RUN and won:
             _vbal_write(_vbal_read() + payout)
         
         # Update metrics
         increment_trade(won)
-        today_data = hm.get_daily_pnl().get(hm._today_str(), {"pnl": 0.0})
-        update_metric("pnl", "daily", today_data.get("pnl", 0.0) if isinstance(today_data, dict) else today_data)
-        update_metric("pnl", "total", hm.get_total_pnl())
+        today_data = hm.get_daily_pnl().get(hm._today_str(), {"pnl": 0.0, "v_pnl": 0.0})
+        pnl_key = "v_pnl" if DRY_RUN else "pnl"
+        today_pnl = today_data.get(pnl_key, 0.0) if isinstance(today_data, dict) else today_data
+        update_metric("pnl", "daily", today_pnl)
+        update_metric("pnl", "total", hm.get_total_pnl(is_dry_run=DRY_RUN))
         update_metric("balances", "virtual", _vbal_read())
 
         get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
@@ -507,7 +466,7 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
     if step == 0:
         price = max(0.35, min(price, 0.65))  # L1 bracket: 35c to 65c
     else:
-        price = max(0.49, min(price, 0.54))  # L2-L5 bracket: 49c to 54c
+        price = max(0.45, min(price, 0.51))  # L2-L5 bracket: 45c to 51c (Updated)
 
     ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
@@ -515,7 +474,7 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
         if DRY_RUN:
             _vbal_write(_vbal_read() - amount)
         hm.log_bet_placed(coin, direction, amount, price, ot, step,
-                          chosen["active_ts"], token_id)
+                          chosen["active_ts"], token_id, is_dry_run=DRY_RUN)
         hm.open_position(coin, direction, amount, price, chosen["active_ts"], token_id)
         with _plock:
             _pending[coin] = {
@@ -599,7 +558,7 @@ def main():
             if st:
                 out[c] = {"up_ask": st.get("up_ask", 0),
                            "down_ask": st.get("down_ask", 0),
-                           "seconds_till_end": st.get("seconds_till_end", 900)}
+                           "seconds_till_end": st.get("seconds_till_end", 300)}
         return out
     tg_bot.get_live_state = _live
 
@@ -617,12 +576,7 @@ def main():
         pol_bal = 0.0
         if not DRY_RUN:
             try:
-                from web3 import Web3
-                w3 = Web3(Web3.HTTPProvider(RPC_URL))
-                if w3.is_connected():
-                    addr = FUNDER_ADDRESS or WALLET_ADDRESS
-                    if addr:
-                        pol_bal = w3.eth.get_balance(w3.to_checksum_address(addr)) / 1e18
+                pol_bal = get_executor().get_pol_balance() or 0.0
             except: pass
             
         log_sz = "0 KB"
@@ -681,14 +635,14 @@ def main():
         if step == 0:
             price = max(0.35, min(price, 0.65))
         else:
-            price = max(0.49, min(price, 0.54))
+            price = max(0.45, min(price, 0.51))
 
         ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
         if ok:
             if DRY_RUN:
                 _vbal_write(_vbal_read() - amount)
-            hm.log_bet_placed(coin, direction, amount, price, ot, step, active_ts, token_id)
+            hm.log_bet_placed(coin, direction, amount, price, ot, step, active_ts, token_id, is_dry_run=DRY_RUN)
             hm.open_position(coin, direction, amount, price, active_ts, token_id)
             with _plock:
                 _pending[coin] = {
@@ -740,7 +694,7 @@ def main():
                     if st:
                         ms[c] = {"up_ask":st.get("up_ask",0),
                                  "down_ask":st.get("down_ask",0),
-                                 "seconds_till_end":st.get("seconds_till_end",900),
+                                 "seconds_till_end":st.get("seconds_till_end",300),
                                  "market_slug":st.get("market_slug","")}
                 with _plock:  ps = {c:_pending.get(c) for c in ACTIVE_COINS}
                 with _tlock:  tl = list(_tradelog)

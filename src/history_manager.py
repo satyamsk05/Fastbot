@@ -3,7 +3,7 @@ History Manager
 ══════════════════════════════════════════════════════
 Manages all persistent state files:
   history/bet_history.json   → every bet placed (result, PnL)
-  history/candle_history.json→ 7-day 15-min candle closes per coin
+  history/candle_history.json→ 7-day 5-min candle closes per coin
   history/open_positions.json→ currently open bets
   history/daily_pnl.json     → date-wise P&L summary
 ══════════════════════════════════════════════════════
@@ -24,8 +24,8 @@ POSITION_FILE= os.path.join(HISTORY_DIR, "open_positions.json")
 DAILY_PNL_FILE = os.path.join(HISTORY_DIR, "daily_pnl.json")
 
 MAX_CANDLE_DAYS = 7          # 7-day candle retention
-CANDLES_PER_DAY = 96         # 15-min candles per day
-MAX_CANDLES = MAX_CANDLE_DAYS * CANDLES_PER_DAY  # 672
+CANDLES_PER_DAY = 288         # 5-min candles per day (24h * 12)
+MAX_CANDLES = MAX_CANDLE_DAYS * CANDLES_PER_DAY  # 2016
 
 _lock = threading.Lock()
 
@@ -71,7 +71,7 @@ def reset_on_startup():
 # ══════════════════════════════════════════════════════════════════════════════
 def log_bet_placed(coin: str, direction: str, amount: float,
                    price: float, order_type: str, step: int,
-                   market_ts: int, token_id: str):
+                   market_ts: int, token_id: str, is_dry_run: bool = False):
     """Record a bet placement."""
     with _lock:
         data = _read(BET_FILE)
@@ -88,6 +88,7 @@ def log_bet_placed(coin: str, direction: str, amount: float,
             "market_ts":  market_ts,
             "token_id":   token_id,
             "placed_at":  int(time.time()),
+            "dry_run":    is_dry_run,         # Added: distinguish simulation
             "result":     None,               # WIN / LOSS — filled on resolution
             "pnl":        None,
             "fee":        0.0,                # Added: 0.24% estimation
@@ -218,7 +219,7 @@ def get_open_positions() -> Dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # DAILY PNL
 # ══════════════════════════════════════════════════════════════════════════════
-def record_pnl(pnl: float):
+def record_pnl(pnl: float, is_dry_run: bool = False):
     """Add pnl to today's total."""
     with _lock:
         data = _read(DAILY_PNL_FILE)
@@ -227,15 +228,16 @@ def record_pnl(pnl: float):
         today = _today_str()
         
         # Support new dictionary format for fee tracking
-        day_data = data.get(today, {"pnl": 0.0, "fee": 0.0})
+        day_data = data.get(today, {"pnl": 0.0, "fee": 0.0, "v_pnl": 0.0, "v_fee": 0.0})
         if isinstance(day_data, (int, float)):
-            day_data = {"pnl": float(day_data), "fee": 0.0}
+            day_data = {"pnl": float(day_data), "fee": 0.0, "v_pnl": 0.0, "v_fee": 0.0}
             
-        day_data["pnl"] = round(day_data["pnl"] + pnl, 4)
+        key = "v_pnl" if is_dry_run else "pnl"
+        day_data[key] = round(day_data[key] + pnl, 4)
         data[today] = day_data
         _write(DAILY_PNL_FILE, data)
 
-def record_fee(fee: float):
+def record_fee(fee: float, is_dry_run: bool = False):
     """Add fee to today's total."""
     with _lock:
         data = _read(DAILY_PNL_FILE)
@@ -243,11 +245,12 @@ def record_fee(fee: float):
             data = {}
         today = _today_str()
         
-        day_data = data.get(today, {"pnl": 0.0, "fee": 0.0})
+        day_data = data.get(today, {"pnl": 0.0, "fee": 0.0, "v_pnl": 0.0, "v_fee": 0.0})
         if isinstance(day_data, (int, float)):
-            day_data = {"pnl": float(day_data), "fee": 0.0}
+            day_data = {"pnl": float(day_data), "fee": 0.0, "v_pnl": 0.0, "v_fee": 0.0}
             
-        day_data["fee"] = round(day_data["fee"] + fee, 4)
+        key = "v_fee" if is_dry_run else "fee"
+        day_data[key] = round(day_data[key] + fee, 4)
         data[today] = day_data
         _write(DAILY_PNL_FILE, data)
 
@@ -257,39 +260,53 @@ def get_daily_pnl() -> Dict[str, float]:
         data = _read(DAILY_PNL_FILE)
         return data if isinstance(data, dict) else {}
 
-def get_total_pnl() -> float:
+def get_total_pnl(is_dry_run: bool = False) -> float:
     data = get_daily_pnl()
     total = 0.0
+    key = "v_pnl" if is_dry_run else "pnl"
     for val in data.values():
-        total += val.get("pnl", 0.0) if isinstance(val, dict) else float(val)
+        total += val.get(key, 0.0) if isinstance(val, dict) else (float(val) if not is_dry_run else 0.0)
     return round(total, 4)
 
-def get_total_fees() -> float:
+def get_total_fees(is_dry_run: bool = False) -> float:
     data = get_daily_pnl()
     total = 0.0
+    key = "v_fee" if is_dry_run else "fee"
     for val in data.values():
-        total += val.get("fee", 0.0) if isinstance(val, dict) else 0.0
+        total += val.get(key, 0.0) if isinstance(val, dict) else 0.0
     return round(total, 4)
 
 
 def get_pnl_summary(days: int = 7) -> str:
     """Returns formatted PNL for Telegram /daily_pnl command."""
     data = get_daily_pnl()
-    if not data:
-        return "(no data yet)"
-    
-    recent = list(data.items())[-days:]
     lines = []
-    total = 0.0
-    for day_label, val in reversed(recent):
-        pnl = val.get("pnl", 0.0) if isinstance(val, dict) else float(val)
-        fee = val.get("fee", 0.0) if isinstance(val, dict) else 0.0
-        sign = "+" if pnl >= 0 else ""
-        emoji = "🟢" if pnl >= 0 else "🔴"
-        lines.append(f"{emoji} {day_label}: {sign}${pnl:.2f} (Fee: ${fee:.2f})")
-        total += pnl
+    for i in range(days):
+        day = (datetime.now() - timedelta(days=i)).strftime("%d %b")
+        iso = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        
+        day_data = data.get(iso, {"pnl": 0.0, "fee": 0.0, "v_pnl": 0.0, "v_fee": 0.0})
+        if isinstance(day_data, (int, float)):
+            day_data = {"pnl": float(day_data), "fee": 0.0, "v_pnl": 0.0, "v_fee": 0.0}
+            
+        pnl = day_data.get("pnl", 0.0)
+        fee = day_data.get("fee", 0.0)
+        v_pnl = day_data.get("v_pnl", 0.0)
+        
+        icon = "🟢" if pnl >= 0 else "🔴"
+        v_icon = "🧪" # Virtual
+        
+        line = f"{icon} {day}: ${pnl:+.2f} (Fee: ${fee:.2f})"
+        if v_pnl != 0:
+            line += f"\n   {v_icon} Sim: ${v_pnl:+.2f}"
+            
+        lines.append(line)
+        
+    total_real = get_total_pnl(is_dry_run=False)
+    total_virt = get_total_pnl(is_dry_run=True)
     
-    sign = "+" if total >= 0 else ""
-    lines.append(f"————————──────")
-    lines.append(f"Net Total: {sign}${total:.2f}")
-    return "\n".join(lines)
+    footer = f"\n💰 Real Total: *${total_real:+.2f}*"
+    if total_virt != 0:
+        footer += f"\n🧪 Sim Total:  *${total_virt:+.2f}*"
+    
+    return "\n".join(lines) + footer

@@ -72,6 +72,8 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
+    import traceback
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
     logging.critical("Uncaught Exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 def get_gsd_logger(name: str):

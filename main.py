@@ -4,7 +4,8 @@
 ║   Polymarket Streak-Reversal Martingale Bot  v2.0        ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Coins    : BTC · ETH · SOL · XRP (configurable)        ║
-║  Interval : 15-minute markets                            ║
+╚══════════════════════════════════════════════════════════╝
+║  Interval : 5-minute markets                            ║
 ║  Signal   : 3+ same-dir closes → reverse bet            ║
 ║  Ladder   : $3 → $6 → $13 → $28 → $60 USDC             ║
 ╠══════════════════════════════════════════════════════════╣
@@ -60,7 +61,7 @@ COINS_ENABLED = {
 }
 ACTIVE_COINS = [c for c, v in COINS_ENABLED.items() if v]
 
-INTERVAL_SEC      = 15 * 60
+INTERVAL_SEC      = 5 * 60
 CANDLE_SETTLE     = 5          # wait N sec after boundary before fetching price
 DASHBOARD_REFRESH = 1.0
 VBAL_START        = 500.0
@@ -172,7 +173,7 @@ def get_in_bets() -> float:
 # MARKET DATA
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tokens(coin: str, ts: int) -> Optional[Dict]:
-    slug = f"{coin.lower()}-updown-15m-{ts}"
+    slug = f"{coin.lower()}-updown-5m-{ts}"
     url  = f"https://gamma-api.polymarket.com/events?slug={slug}"
     try:
         r = requests.get(url, timeout=10)

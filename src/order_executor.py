@@ -272,7 +272,7 @@ class OrderExecutor:
     def get_wallet_usdc_balance(self) -> Optional[float]:
         """
         Get wallet USDC balance (bridged + native)
-        Copy of method from /root/clip/trade.py
+        Uses PARALLEL REQUESTS to multiple RPC endpoints for maximum reliability.
         """
         try:
             if not self.wallet_address and self.private_key:
@@ -282,47 +282,45 @@ class OrderExecutor:
                 logger.info("[EXECUTOR] ❌ No wallet address")
                 return None
             
-            # Use first RPC endpoint for wallet balance queries
-            rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
-            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
+            def query_single_rpc_usdc(rpc_url: str) -> Optional[float]:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
+                    if not w3.is_connected(): return None
+                    
+                    total = 0.0
+                    for addr in [self.USDC_BRIDGED, self.USDC_NATIVE]:
+                        cnt = w3.eth.contract(address=Web3.to_checksum_address(addr), abi=self.ERC20_ABI)
+                        bal = cnt.functions.balanceOf(self.wallet_address).call()
+                        dec = cnt.functions.decimals().call()
+                        total += bal / (10 ** dec)
+                    return total
+                except: return None
+
+            # Parallel query logic
+            if self.rpc_parallel_enabled and len(self.rpc_endpoints) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.rpc_endpoints)) as executor:
+                    futures = {executor.submit(query_single_rpc_usdc, rpc): rpc for rpc in self.rpc_endpoints}
+                    for future in concurrent.futures.as_completed(futures, timeout=self.rpc_parallel_timeout):
+                        res = future.result()
+                        if res is not None:
+                            logger.info(f"[EXECUTOR] ✅ Wallet balance (parallel): ${res:.2f}")
+                            return res
             
-            if not w3.is_connected():
-                logger.info("[EXECUTOR] ⚠ Cannot connect to RPC")
-                return None
-            
-            total = 0.0
-            
-            # USDC.e (bridged) - main Polymarket token
-            usdc_e = w3.eth.contract(
-                address=Web3.to_checksum_address(self.USDC_BRIDGED), 
-                abi=self.ERC20_ABI
-            )
-            balance_e = usdc_e.functions.balanceOf(self.wallet_address).call()
-            decimals_e = usdc_e.functions.decimals().call()
-            total += balance_e / (10 ** decimals_e)
-            
-            # Native USDC
-            usdc_n = w3.eth.contract(
-                address=Web3.to_checksum_address(self.USDC_NATIVE), 
-                abi=self.ERC20_ABI
-            )
-            balance_n = usdc_n.functions.balanceOf(self.wallet_address).call()
-            decimals_n = usdc_n.functions.decimals().call()
-            total += balance_n / (10 ** decimals_n)
-            
-            logger.info(f"[EXECUTOR] Wallet balance: ${total:.2f}")
-            return total
-            
+            # Fallback to sequential
+            for rpc in self.rpc_endpoints:
+                res = query_single_rpc_usdc(rpc)
+                if res is not None:
+                    logger.info(f"[EXECUTOR] ✅ Wallet balance (seq): ${res:.2f}")
+                    return res
+            return None
         except Exception as e:
-            logger.info(f"[EXECUTOR] ❌ Balance query error: {e}")
+            logger.info(f"[EXECUTOR] ❌ USDC balance error: {e}")
             return None
     
     def get_pol_balance(self) -> Optional[float]:
         """
         Get POL balance (native Polygon token)
-        
-        Returns:
-            Balance in POL or None on error
+        Uses PARALLEL REQUESTS to multiple RPC endpoints for maximum reliability.
         """
         try:
             if not self.wallet_address and self.private_key:
@@ -332,24 +330,33 @@ class OrderExecutor:
                 logger.info("[EXECUTOR] ❌ No wallet address")
                 return None
             
-            # Use first RPC endpoint for wallet balance queries
-            rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
-            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
+            def query_single_rpc_pol(rpc_url: str) -> Optional[float]:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
+                    if not w3.is_connected(): return None
+                    balance_wei = w3.eth.get_balance(self.wallet_address)
+                    return balance_wei / 1e18
+                except: return None
+
+            # Parallel query logic
+            if self.rpc_parallel_enabled and len(self.rpc_endpoints) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.rpc_endpoints)) as executor:
+                    futures = {executor.submit(query_single_rpc_pol, rpc): rpc for rpc in self.rpc_endpoints}
+                    for future in concurrent.futures.as_completed(futures, timeout=self.rpc_parallel_timeout):
+                        res = future.result()
+                        if res is not None:
+                            logger.info(f"[EXECUTOR] POL balance (parallel): {res:.4f}")
+                            return res
             
-            if not w3.is_connected():
-                logger.info("[EXECUTOR] ⚠ Cannot connect to RPC")
-                return None
-            
-            # Get native balance (in Wei)
-            balance_wei = w3.eth.get_balance(self.wallet_address)
-            # Convert to POL (1 POL = 10^18 Wei)
-            balance_pol = balance_wei / 1e18
-            
-            logger.info(f"[EXECUTOR] POL balance: {balance_pol:.4f}")
-            return balance_pol
-            
+            # Fallback to sequential
+            for rpc in self.rpc_endpoints:
+                res = query_single_rpc_pol(rpc)
+                if res is not None:
+                    logger.info(f"[EXECUTOR] POL balance (seq): {res:.4f}")
+                    return res
+            return None
         except Exception as e:
-            logger.info(f"[EXECUTOR] ❌ POL balance query error: {e}")
+            logger.info(f"[EXECUTOR] ❌ POL balance error: {e}")
             return None
     
     def get_blockchain_token_balance(self, token_id: str) -> Optional[float]:
@@ -2012,6 +2019,8 @@ class OrderExecutor:
         except Exception as e:
             logger.info(f"[REDEEM] ❌ Error: {e}")
             return (False, 0.0)
+
+    def _notify_telegram_critical(self, message: str):
         """
         Send critical notification to Telegram
         Used for CRITICAL errors (failed to sell everything)
@@ -2345,3 +2354,24 @@ class OrderExecutor:
             import traceback
             logging.exception("Exception occurred")
             return False, 0.0
+
+# Singleton getter
+_executor_instance: Optional[OrderExecutor] = None
+def get_executor() -> OrderExecutor:
+    global _executor_instance
+    if _executor_instance is None:
+        # Avoid circular import by fetching values from env or central config if possible
+        # Import here is fine for singleton pattern
+        import os
+        rpc = os.getenv("RPC_URL", "https://polygon-rpc.com")
+        pk  = os.getenv("PRIVATE_KEY")
+        wal = os.getenv("WALLET_ADDRESS")
+        fund = os.getenv("FUNDER_ADDRESS")
+        dry = os.getenv("DRY_RUN", "true").lower() == "true"
+        
+        config = {
+            "execution": {"buy": {"min_order_usd": 1.0}},
+            "rpc": {"endpoints": [rpc]}
+        }
+        _executor_instance = OrderExecutor(config, pk, wal, fund, dry)
+    return _executor_instance

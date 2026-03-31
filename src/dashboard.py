@@ -112,7 +112,7 @@ class Dashboard:
             pen = (pending or {}).get(coin)
 
             # Timer with color
-            sec_left = ms.get("seconds_till_end", 900)
+            sec_left = ms.get("seconds_till_end", 300)
             t_clr = "red bold" if sec_left < 60 else "red" if sec_left < 120 else "yellow" if sec_left < 300 else "green"
             timer_str = f"[{t_clr}]{self._fmt_timer(sec_left)}[/]"
 
