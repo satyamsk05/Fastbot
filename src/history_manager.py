@@ -12,7 +12,7 @@ import json
 import os
 import time
 import threading
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
 from utils.gsd_logger import get_gsd_logger
 logger = get_gsd_logger("HIST")
@@ -296,9 +296,9 @@ def get_pnl_summary(days: int = 7) -> str:
         icon = "🟢" if pnl >= 0 else "🔴"
         v_icon = "🧪" # Virtual
         
-        line = f"{icon} {day}: ${pnl:+.2f} (Fee: ${fee:.2f})"
+        line = f"*{icon} {day}:* *${pnl:+.2f}* (Fee: *${fee:.2f}*)"
         if v_pnl != 0:
-            line += f"\n   {v_icon} Sim: ${v_pnl:+.2f}"
+            line += f"\n   {v_icon} Sim: *${v_pnl:+.2f}*"
             
         lines.append(line)
         

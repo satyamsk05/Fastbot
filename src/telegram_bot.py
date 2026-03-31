@@ -233,24 +233,7 @@ class TelegramBot:
 
     async def _cmd_daily_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         summary = hm.get_pnl_summary(days=7)
-        # Summary helper in history_manager doesn't use bold values, I'll let it be for now or fix it locally
-        # Replacing for bold values
-        lines = []
-        for line in summary.split("\n"):
-            if "Net Total" in line: lines.append(line) # keep as is
-            elif "Mar:" in line:
-                # 🔴 30 Mar: $-10.02 (Fee: $0.02)
-                parts = line.split(":")
-                if len(parts) >= 2:
-                    prefix = parts[0]
-                    suffix = parts[1].strip().split("(")
-                    val = suffix[0].strip()
-                    fee = suffix[1].replace(")","").strip() if len(suffix)>1 else ""
-                    lines.append(f"*{prefix}:* *{val}* (*{fee}*)")
-                else: lines.append(line)
-            else: lines.append(line)
-        
-        bold_summary = "\n".join(lines)
+        bold_summary = summary
         await update.message.reply_text(f"*📅 Daily PNL (7 days)*\n\n{bold_summary}", 
                                         parse_mode="Markdown", reply_markup=self._get_kb())
 
