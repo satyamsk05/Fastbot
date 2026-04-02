@@ -96,22 +96,19 @@ _redeem_status = "Idle"
 # WALLET
 # ═══════════════════════════════════════════════════════════════════════════════
 _VBAL = "data/virtual_balance.json"
-_vbal_lock = threading.Lock()
 
 def _vbal_read() -> float:
-    with _vbal_lock:
-        try:
-            if os.path.exists(_VBAL):
-                with open(_VBAL) as f:
-                    return float(json.load(f).get("balance", VBAL_START))
-        except Exception:
-            pass
-        return VBAL_START
+    try:
+        if os.path.exists(_VBAL):
+            with open(_VBAL) as f:
+                return float(json.load(f).get("balance", VBAL_START))
+    except Exception:
+        pass
+    return VBAL_START
 
 def _vbal_write(b: float):
-    with _vbal_lock:
-        with open(_VBAL,"w") as f:
-            json.dump({"balance": round(b,2)}, f)
+    with open(_VBAL,"w") as f:
+        json.dump({"balance": round(b,2)}, f)
 
 def get_wallet_balance() -> float:
     if DRY_RUN:
@@ -439,7 +436,7 @@ class CoinProc:
         if DRY_RUN and won:
             _vbal_write(_vbal_read() + payout)
 
-        get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
+        # get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
 
         with _tlock:
             _tradelog.append({"coin":coin, "direction":direction,
@@ -476,7 +473,7 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
         return
 
     # Notify signal
-    notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
+    # notifier.notify_signal(coin, direction, amount, step, chosen["closes"])
 
     # Already has pending?
     with _plock:
