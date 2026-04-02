@@ -373,6 +373,13 @@ class TelegramBot:
             _box("📊  TREND DATA", lines), parse_mode="Markdown"
         )
 
+    # ── hide keyboard ──────────────────────────────────────────────────────────
+    async def _cmd_hide(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        from telegram import ReplyKeyboardRemove
+        await update.message.reply_text(
+            "⌨️ Keyboard hidden. Type /menu to show it again.",
+            reply_markup=ReplyKeyboardRemove()
+        )
 
     # ── manual bet menu (Step 1: Pick Coin) ─────────────────────────────────
     async def _cmd_manual_bet(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):

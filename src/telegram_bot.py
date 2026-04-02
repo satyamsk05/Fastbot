@@ -403,17 +403,6 @@ class TelegramNotifier:
             f"*PnL:*   *{'+' if pnl>=0 else ''}${pnl:.2f}*"
         ]))
 
-    def notify_signal(self, coin: str, direction: str, amount: float, step: int, closes: list):
-        arrow = "UP" if direction == "YES" else "DOWN"
-        emoji = "🟢" if arrow == "UP" else "🔴"
-        streak = "↑↑↑" if direction == "NO" else "↓↓↓"
-        self.send(_box(f"🎯 SIGNAL {coin}", [
-            f"*Side:*   {emoji} *{arrow}*",
-            f"*Amount:* *${amount:.0f}* (L{step+1})",
-            f"*Streak:* *{streak}*",
-            f"*Closes:* {[f'{c:.3f}' for c in closes[-3:]]}"
-        ]))
-
     def notify_error(self, title: str, details: str):
         """Send a critical error alert."""
         self.send(_box(f"🚨 ALERT: {title}", [

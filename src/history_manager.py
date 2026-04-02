@@ -40,9 +40,7 @@ def _read(path: str) -> dict | list:
                 return json.load(f)
     except Exception:
         pass
-    if "candle" in path or "pnl" in path or "position" in path:
-        return {}
-    return []
+    return {} if path.endswith("history.json") or "pnl" in path else []
 
 
 def _write(path: str, data):
@@ -114,12 +112,10 @@ def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float, fee: float 
         _write(BET_FILE, data)
 
 
-def get_bet_history(n: int = 50) -> List[Dict]:
-    """Returns the last n bets."""
+def get_bet_history() -> List[Dict]:
     with _lock:
         data = _read(BET_FILE)
-        result = data if isinstance(data, list) else []
-        return result[-n:]
+        return data if isinstance(data, list) else []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -156,6 +152,13 @@ def get_candle_history(coin: str, n: int = MAX_CANDLES) -> List[Dict]:
             return []
         return data.get(coin.upper(), [])[-n:]
 
+def get_bet_history(n: int = 10) -> List[Dict]:
+    """Returns the last n bets."""
+    with _lock:
+        data = _read(BET_FILE)
+        if not isinstance(data, list):
+            return []
+        return data[-n:]
 
 
 def get_candle_closes(coin: str, n: int = 5) -> List[float]:
