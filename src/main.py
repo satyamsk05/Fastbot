@@ -97,19 +97,22 @@ _redeem_status = "Idle"
 # WALLET
 # ═══════════════════════════════════════════════════════════════════════════════
 _VBAL = "data/virtual_balance.json"
+_vbal_lock = threading.Lock()
 
 def _vbal_read() -> float:
-    try:
-        if os.path.exists(_VBAL):
-            with open(_VBAL) as f:
-                return float(json.load(f).get("balance", VBAL_START))
-    except Exception:
-        pass
-    return VBAL_START
+    with _vbal_lock:
+        try:
+            if os.path.exists(_VBAL):
+                with open(_VBAL) as f:
+                    return float(json.load(f).get("balance", VBAL_START))
+        except Exception:
+            pass
+        return VBAL_START
 
 def _vbal_write(b: float):
-    with open(_VBAL,"w") as f:
-        json.dump({"balance": round(b,2)}, f)
+    with _vbal_lock:
+        with open(_VBAL,"w") as f:
+            json.dump({"balance": round(b,2)}, f)
 
 def get_wallet_balance() -> float:
     if DRY_RUN:
@@ -221,7 +224,12 @@ def _redeem_all():
                             funder=FUNDER_ADDRESS or None)
 
         # 1. Fetch unredeemed positions from Polymarket Data API
-        url = f"https://data-api.polymarket.com/positions?user={WALLET_ADDRESS}&redeemable=true"
+        addr = WALLET_ADDRESS or FUNDER_ADDRESS
+        if not addr:
+            _redeem_status = "No address"
+            return
+
+        url = f"https://data-api.polymarket.com/positions?user={addr}&redeemable=true"
         r = requests.get(url, timeout=15)
         if r.status_code != 200:
             _redeem_status = "API Error"
@@ -480,6 +488,9 @@ def _execute_signals(signals: List[Dict], notifier, data_feed):
         else:
             price = max(0.45, min(price, 0.51))
 
+        # Notify Signal BEFORE placement
+        notifier.notify_signal(coin, direction, amount, step, chosen.get("closes", []))
+
         ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
         if ok:
@@ -653,11 +664,8 @@ def main():
         token_id = tkns["yes_token"] if direction == "YES" else tkns["no_token"]
         step = _mg.get_step(coin)
 
-        # ── Price bracket to avoid outliers ──
-        if step == 0:
-            price = max(0.35, min(price, 0.65))
-        else:
-            price = max(0.45, min(price, 0.51))
+        # ── Manual bet bracket (L1 defaults) ──
+        price = max(0.35, min(price, 0.65))
 
         ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
