@@ -108,10 +108,12 @@ def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float, fee: float 
         _write(BET_FILE, data)
 
 
-def get_bet_history() -> List[Dict]:
+def get_bet_history(n: int = 50) -> List[Dict]:
+    """Returns the last n bets."""
     with _lock:
         data = _read(BET_FILE)
-        return data if isinstance(data, list) else []
+        result = data if isinstance(data, list) else []
+        return result[-n:]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

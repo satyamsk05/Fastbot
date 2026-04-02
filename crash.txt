@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/Users/satyamkumar/Desktop/2in/src/main.py", line 802, in <module>
+    main()
+    ~~~~^^
+  File "/Users/satyamkumar/Desktop/2in/src/main.py", line 797, in main
+    time.sleep(1)
+    ~~~~~~~~~~^^^
+  File "/Users/satyamkumar/Desktop/2in/src/main.py", line 713, in _shutdown
+    sys.exit(0)
+    ~~~~~~~~^^^
+SystemExit: 0
