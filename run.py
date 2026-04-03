@@ -39,10 +39,11 @@ def run_bot():
     else:
         env["PYTHONPATH"] = src_path
 
-    # Run the bot using the same python interpreter
-    # We call 'src/main.py' directly or use 'python3 -m src.main'
-    # Since run.py previously did 'from main import main', we can use python3 src/main.py
-    cmd = [sys.executable, os.path.join(ROOT_DIR, "src/main.py")]
+    # Detect VENV interpreter
+    venv_python = os.path.join(ROOT_DIR, "venv", "bin", "python3")
+    py_exec = venv_python if os.path.exists(venv_python) else sys.executable
+    
+    cmd = [py_exec, os.path.join(ROOT_DIR, "main.py")]
     
     try:
         process = subprocess.Popen(cmd, env=env)

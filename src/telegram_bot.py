@@ -102,13 +102,20 @@ class TelegramBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
 
         self._running = True
+        logger.info(f"[TG] Initializing Application with token: {BOT_TOKEN[:5]}...{BOT_TOKEN[-5:]}")
         await app.initialize()
+        logger.info("[TG] Starting Application...")
         await app.start()
+        logger.info("[TG] Starting Polling...")
         await app.updater.start_polling(drop_pending_updates=True)
+        logger.info("[TG] Bot is now ONLINE and polling.")
 
         # Remove hamburger menu
-        try: await app.bot.delete_my_commands()
-        except: pass
+        try: 
+            await app.bot.delete_my_commands()
+            logger.info("[TG] Commands menu cleared.")
+        except Exception as e:
+            logger.warning(f"[TG] Could not clear commands: {e}")
 
         # Keyboard is active via reply_markup on first command or persistent menu
         pass
@@ -132,7 +139,7 @@ class TelegramBot:
     def _get_kb(self):
         """Minimalist Option 2 Keyboard."""
         from telegram import ReplyKeyboardMarkup, KeyboardButton
-        stop_label = "▶ Resume" if self.is_paused else "⏹ Pause"
+        stop_label = "▶ Resume" if self.is_paused else "■ Pause"
         return ReplyKeyboardMarkup(
             [
                 [KeyboardButton("🖥 Live"),    KeyboardButton("🏦 Wallet"), KeyboardButton("📦 Open")],
@@ -292,7 +299,7 @@ class TelegramBot:
             "📊 PnL":     self._cmd_daily_pnl,
             "🩺 System":  self._cmd_health,
             "⚡ Quick Bet": self._cmd_manual_bet,
-            "⏹ Pause":   self._cmd_stop,
+            "■ Pause":   self._cmd_stop,
             "▶ Resume":  self._cmd_stop
         }
         if text in btn_map:
