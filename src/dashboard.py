@@ -25,16 +25,18 @@ COINS = ["BTC", "ETH", "SOL", "XRP"]
 class Dashboard:
     """Unified Renderable Dashboard for Maximum Stability."""
 
-    def __init__(self, coins: list = None, width: int = 120):
+    def __init__(self, coins: list = None):
         self.start_time = time.time()
         self.coins = [c.upper() for c in (coins or COINS)]
         self._log_buffer: List[str] = [] 
         self._lock = threading.Lock()
-        self.console = Console(width=width)
+        
+        # ── FIXED: Auto-detect width and force terminal for SSH ──
+        self.console = Console(force_terminal=True, color_system="auto")
         
         self._live: Optional[Live] = None
         self._last_render_ts = 0
-        self._current_renderable = Panel("Initializing...", border_style="yellow")
+        self._current_renderable = Panel("Initializing Dashboard...", border_style="yellow")
 
     def log(self, msg: str):
         """Thread-safe logging."""
@@ -101,7 +103,15 @@ class Dashboard:
                 pos = "[dim]· idle[/]"
 
             m_table.add_row(c, t_val, f"{up:.3f}", f"{dn:.3f}", bias, blocks, pos)
-        markets = Panel(m_table, title="[bold white]MARKETS[/]", border_style="grey37")
+        
+        # 2.1 Use narrow layout if terminal width < 90
+        is_narrow = self.console.width < 90
+        markets = Panel(
+            m_table, 
+            title="[bold white]MARKETS[/]", 
+            border_style="grey37",
+            padding=(0, 1) if is_narrow else (1, 1)
+        )
 
         # 3. FOOTER
         f_grid = Table.grid(expand=True)
@@ -124,8 +134,8 @@ class Dashboard:
                 lg_text.append(Text.from_markup(f" {line}\n"))
         
         f_grid.add_row(
-            Panel(tr_text, title="[bold]TRADES[/]", border_style="grey37", expand=True, height=10),
-            Panel(lg_text, title="[bold]LOGS[/]", border_style="grey37", expand=True, height=10)
+            Panel(tr_text, title="[bold]TRADES[/]", border_style="grey37", expand=True, height=8 if is_narrow else 10),
+            Panel(lg_text, title="[bold]LOGS[/]", border_style="grey37", expand=True, height=8 if is_narrow else 10)
         )
 
         # 4. Final Assemblage & Push to Live update

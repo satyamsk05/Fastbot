@@ -587,7 +587,7 @@ def main():
     # Build components
     tg_bot   = get_bot()
     notifier = get_notifier()
-    dash     = Dashboard(width=120, coins=ACTIVE_COINS)
+    dash     = Dashboard(coins=ACTIVE_COINS)
     tg_bot.active_coins = ACTIVE_COINS
 
     # Start data feed
@@ -781,6 +781,8 @@ def main():
     procs = {c: CoinProc(c) for c in ACTIVE_COINS}
 
     # Main loop with parallel coin processing
+    # ── Startup delay for terminal stabilization ──
+    time.sleep(1)
     with dash.live_context():
         logger.info("System Running (parallel)")
         with ThreadPoolExecutor(max_workers=len(ACTIVE_COINS)) as executor:
