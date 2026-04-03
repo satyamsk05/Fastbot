@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════╗
-║   Polymarket Streak-Reversal Martingale Bot  v2.0        ║
+║   FASTBOT: Polymarket Streak-Reversal Suite  v2.5        ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Coins    : BTC · ETH · SOL · XRP (configurable)        ║
-╚══════════════════════════════════════════════════════════╝
-║  Interval : 5-minute markets                            ║
+╠══════════════════════════════════════════════════════════╣
+║  Interval : 15-minute markets                           ║
 ║  Signal   : 3+ same-dir closes → reverse bet            ║
 ║  Ladder   : $3 → $6 → $13 → $28 → $60 USDC             ║
 ╠══════════════════════════════════════════════════════════╣
-║  Data     : 4coinsbot WebSocket (live orderbook)         ║
-║  History  : bet_history / candle_history / positions     ║
-║  Telegram : /history /live /stop /balance /position      ║
-║             /daily_pnl  +  manual $N bets                ║
+║  Strategy : Ultra-Reliable High-Performance Mode        ║
+║  Execution: Optimized Brackets (L1: 45-55 | L2+: 49-53)  ║
 ╚══════════════════════════════════════════════════════════╝
 """
 
@@ -61,9 +59,9 @@ COINS_ENABLED = {
 }
 ACTIVE_COINS = [c for c, v in COINS_ENABLED.items() if v]
 
-INTERVAL_SEC      = 5 * 60
+INTERVAL_SEC      = 15 * 60
 CANDLE_SETTLE     = 5          # wait N sec after boundary before fetching price
-DASHBOARD_REFRESH = 1.0
+DASHBOARD_REFRESH = 0.2
 VBAL_START        = 500.0
 BET_MIN_FUNDS     = 3.0
 
@@ -93,9 +91,12 @@ _start_time = time.time()
 _redeem_status = "Idle"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WALLET
+# WALLET (CACHED)
 # ═══════════════════════════════════════════════════════════════════════════════
 _VBAL = "data/virtual_balance.json"
+_cached_bal = 0.0
+_blk_bal    = threading.Lock()
+_last_bal_ts = 0
 
 def _vbal_read() -> float:
     try:
@@ -111,9 +112,37 @@ def _vbal_write(b: float):
         json.dump({"balance": round(b,2)}, f)
 
 def get_wallet_balance() -> float:
+    """Returns the cached balance immediately to avoid UI freezes."""
+    with _blk_bal:
+        if _cached_bal > 0:
+            return _cached_bal
+    
+    # Fallback only if cache is empty
     if DRY_RUN:
         return _vbal_read()
-    return get_real_balance()
+    return 0.0
+
+def _sync_balance_worker():
+    """Background thread to fetch balance synchronously without blocking the UI."""
+    global _cached_bal, _last_bal_ts
+    while not _stop.is_set():
+        try:
+            if DRY_RUN:
+                new_bal = _vbal_read()
+            else:
+                new_bal = get_real_balance()
+            
+            with _blk_bal:
+                _cached_bal = new_bal
+                _last_bal_ts = int(time.time())
+        except Exception as e:
+            logging.debug(f"[SYNC-BAL] Error: {e}")
+        
+        # Refresh every 60s in LIVE, or 10s in DRY
+        delay = 10 if DRY_RUN else 60
+        for _ in range(delay):
+            if _stop.is_set(): break
+            time.sleep(1)
 
 def get_real_balance() -> float:
     try:
@@ -496,9 +525,9 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
 
     # ── FIXED: Price bracket to avoid outliers ──
     if step == 0:
-        price = max(0.35, min(price, 0.65))  # L1 bracket: 35c to 65c
+        price = max(0.45, min(price, 0.55))  # L1 bracket: 45c to 55c
     else:
-        price = max(0.49, min(price, 0.54))  # L2-L5 bracket: 49c to 54c
+        price = max(0.49, min(price, 0.53))  # L2-L5 bracket: 49c to 53c
 
     ok, price, ot = _place(token_id, amount, coin, step, direction, price=price)
 
@@ -540,7 +569,7 @@ def main():
 
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
-║   Polymarket Streak-Reversal Martingale Bot  v2.0        ║
+║   FASTBOT: Polymarket Streak-Reversal Suite  v2.5        ║
 ║   Mode : {'DRY RUN' if DRY_RUN else 'LIVE TRADING':<49}║
 ║   Coins: {', '.join(ACTIVE_COINS):<49}║
 ╚══════════════════════════════════════════════════════════╝""")
@@ -558,7 +587,7 @@ def main():
     # Build components
     tg_bot   = get_bot()
     notifier = get_notifier()
-    dash     = Dashboard(width=160, coins=ACTIVE_COINS)
+    dash     = Dashboard(width=120, coins=ACTIVE_COINS)
     tg_bot.active_coins = ACTIVE_COINS
 
     # Start data feed
@@ -728,12 +757,16 @@ def main():
                 with _plock:  ps = {c:_pending.get(c) for c in ACTIVE_COINS}
                 with _tlock:  tl = list(_tradelog)
                 dash.render(ms, {c:_mg.get_step(c) for c in ACTIVE_COINS},
-                            ps, tl, get_wallet_balance(), DRY_RUN)
+                            ps, tl, get_wallet_balance(), DRY_RUN, 
+                            last_bal_ts=_last_bal_ts)
             except Exception as e:
                 logging.error(f"[DASH] {e}")
             time.sleep(DASHBOARD_REFRESH)
 
     threading.Thread(target=_dash, daemon=True, name="dashboard").start()
+
+    # Background Balance Sync thread
+    threading.Thread(target=_sync_balance_worker, daemon=True, name="balance_sync").start()
 
     # Settlement/Redeem thread (runs every 30m)
     def _settle_loop():

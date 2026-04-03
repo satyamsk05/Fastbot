@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════╗
-║   GSD Watchdog Supervisor v1.0                           ║
-║   Auto-restarts the Polymarket bot upon crash.           ║
+║   FASTBOT: Watchdog Supervisor v2.5                      ║
+║   Auto-restarts the Fastbot suite upon crash.            ║
 ╚══════════════════════════════════════════════════════════╝
 """
 import sys

@@ -1,213 +1,144 @@
 """
-Phase 06: Visual Overhaul — Refined Terminal Dashboard
+Phase 13: Final Stability — Compatible Unified Dashboard
 ══════════════════════════════════════════════════════
-A high-fidelity terminal dashboard using 'rich.live'.
-Features:
-- Fixed position rendering (no scrolling)
-- Thread-safe internal logging panel
-- Sentiment-aware color coding
-- Clean, data-dense layout
+Final high-performance dashboard with compatible Rich methods.
+Uses unified Group for absolute rendering stability.
 ══════════════════════════════════════════════════════
 """
 import time
 import threading
 from typing import Dict, List, Optional
-from datetime import datetime
 
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
-from rich.layout import Layout
 from rich.text import Text
-from rich.columns import Columns
+from rich.align import Align
+from rich.box import ROUNDED
+from rich.console import Group
 
 from strategy import BET_SEQUENCE
 
 COINS = ["BTC", "ETH", "SOL", "XRP"]
 
-
 class Dashboard:
-    """Premium Terminal Dashboard using Rich Live (Scroll-Free)."""
+    """Unified Renderable Dashboard for Maximum Stability."""
 
-    def __init__(self, coins: list = None):
+    def __init__(self, coins: list = None, width: int = 120):
         self.start_time = time.time()
         self.coins = [c.upper() for c in (coins or COINS)]
-        self._log_buffer: List[str] = []
+        self._log_buffer: List[str] = [] 
         self._lock = threading.Lock()
-        self.console = Console()
+        self.console = Console(width=width)
+        
         self._live: Optional[Live] = None
+        self._last_render_ts = 0
+        self._current_renderable = Panel("Initializing...", border_style="yellow")
 
-    def log(self, msg: str, style: str = "white"):
-        """Add a message to the internal system log panel."""
+    def log(self, msg: str):
+        """Thread-safe logging."""
         ts = time.strftime("%H:%M:%S")
         with self._lock:
-            self._log_buffer.append(f"[dim]{ts}[/] {msg}")
-            self._log_buffer = self._log_buffer[-8:]
+            # Defensive cleaning for rich markup injection
+            clean = str(msg).replace("[", "［").replace("]", "］")
+            self._log_buffer.append(f"[grey50]{ts}[/] {clean}")
+            self._log_buffer = self._log_buffer[-10:]
 
     def log_error(self, msg: str):
-        self.log(f"[red]✗ {msg}[/]")
+        self.log(f"[bold red]✗ {msg}[/]")
 
     def live_context(self):
-        """Returns the Live context manager for use in 'with' blocks."""
-        self._live = Live(None, console=self.console, refresh_per_second=4, screen=True)
+        """Live context (4Hz for maximum stability and low CPU)."""
+        self._live = Live(self._current_renderable, console=self.console, 
+                          refresh_per_second=4, screen=True, auto_refresh=True)
         return self._live
 
     def render(self, market_states: Dict, mg_steps: Dict,
                pending: Dict, trade_log: List, wallet_bal: float,
-               dry_run: bool = True, candle_history: Dict = None):
-        """Updates the Live display with the latest layout."""
-        grid = self._build_layout(market_states, mg_steps, pending,
-                                  trade_log, wallet_bal, dry_run)
-        if self._live and self._live.is_started:
-            self._live.update(grid)
-        else:
-            self.console.clear()
-            self.console.print(grid)
+               dry_run: bool = True, candle_history: Dict = None,
+               last_bal_ts: int = 0):
+        """Builds one unified renderable to ensure perfectly synced levels."""
+        now = time.time()
+        if now - self._last_render_ts < 0.15:
+            return
+        self._last_render_ts = now
 
-    # ── builders ──────────────────────────────────────────────────────────────
-    def _build_layout(self, market_states, mg_steps, pending, trade_log,
-                      wallet_bal, dry_run) -> Layout:
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="main", size=9),
-            Layout(name="bottom", size=9)
-        )
-
-        # ── 1. Header Bar ─────────────────────────────────────────────────
-        runtime = self._fmt_time(time.time() - self.start_time)
+        # 1. HEADER
+        runtime = self._fmt_time(now - self.start_time)
         mode = "[bold yellow]DRY[/]" if dry_run else "[bold red]LIVE[/]"
-        in_bets = sum(
-            p.get("amount", 0) for p in (pending or {}).values() if p
-        )
-        header = Text()
-        header.append(" ◆ ", style="bold cyan")
-        header.append("POLYMARKET", style="bold white")
-        header.append("  │  ", style="dim")
-        header.append(f"⏱ {runtime}", style="green")
-        header.append("  │  ", style="dim")
-        header.append(f"Mode: ", style="dim")
-        header.append_text(Text.from_markup(mode))
-        header.append("  │  ", style="dim")
-        header.append(f"💰 ${wallet_bal:,.2f}", style="bold green")
-        header.append("  │  ", style="dim")
-        header.append(f"🔒 ${in_bets:,.2f}", style="yellow")
+        in_bets = sum(p.get("amount", 0) for p in (pending or {}).values() if p)
+        age = int(now - last_bal_ts) if last_bal_ts > 0 else 0
+        age_str = f" [dim]({age}s)[/]" if age > 10 else ""
 
-        layout["header"].update(Panel(header, border_style="cyan", padding=(0, 1)))
+        h_msg = f" ◆ [bold white]FASTBOT[/] │ ⏱ [green]{runtime}[/] │ {mode} │ 💰 [bold green]${wallet_bal:,.2f}[/]{age_str} │ 🔒 [yellow]${in_bets:,.2f}[/]"
+        header = Panel(Align.center(Text.from_markup(h_msg)), border_style="cyan", box=ROUNDED)
 
-        # ── 2. Market Table (No Trend column) ─────────────────────────────
-        table = Table(box=None, expand=True, padding=(0, 1), pad_edge=True)
-        table.add_column("COIN", justify="left", style="bold cyan", width=5)
-        table.add_column("⏱ TIME", justify="center", width=7)
-        table.add_column("⬆ UP", justify="right", style="green", width=7)
-        table.add_column("⬇ DN", justify="right", style="red", width=7)
-        table.add_column("FAV", justify="center", width=8)
-        table.add_column("MG", justify="left", width=16)
-        table.add_column("POSITION", justify="left", min_width=22)
+        # 2. MARKETS
+        m_table = Table(box=None, expand=True, header_style="bold cyan")
+        m_table.add_column("COIN")
+        m_table.add_column("TIME", justify="center")
+        m_table.add_column("UP ASK", justify="right", style="green")
+        m_table.add_column("DN ASK", justify="right", style="red")
+        m_table.add_column("BIAS", justify="center")
+        m_table.add_column("MARTINGALE", justify="left")
+        m_table.add_column("POSITION", justify="left")
 
-        for coin in self.coins:
-            ms = (market_states or {}).get(coin, {})
-            step = (mg_steps or {}).get(coin, 0)
-            pen = (pending or {}).get(coin)
+        for c in self.coins:
+            ms = (market_states or {}).get(c, {})
+            st = (mg_steps or {}).get(c, 0)
+            pen = (pending or {}).get(c)
 
-            # Timer with color
-            sec_left = ms.get("seconds_till_end", 300)
-            t_clr = "red bold" if sec_left < 60 else "red" if sec_left < 120 else "yellow" if sec_left < 300 else "green"
-            timer_str = f"[{t_clr}]{self._fmt_timer(sec_left)}[/]"
-
-            # Prices
-            up = ms.get("up_ask", 0.0)
-            dn = ms.get("down_ask", 0.0)
-            up_str = f"{up:.3f}" if up > 0 else "[dim]--[/]"
-            dn_str = f"{dn:.3f}" if dn > 0 else "[dim]--[/]"
-
-            # Favourite
-            if up > 0 and dn > 0:
-                conf = abs(up - dn)
-                if up > dn:
-                    fav_str = f"[green]▲[/] [dim]{conf:.2f}[/]"
-                else:
-                    fav_str = f"[red]▼[/] [dim]{conf:.2f}[/]"
-            else:
-                fav_str = "[dim]—[/]"
-
-            # MG Progress Bar
-            blocks = []
-            for i in range(len(BET_SEQUENCE)):
-                if i < step:
-                    blocks.append("[red]●[/]")
-                elif i == step:
-                    blocks.append("[bold yellow]◉[/]")
-                else:
-                    blocks.append("[dim]○[/]")
-            bet_amt = BET_SEQUENCE[min(step, len(BET_SEQUENCE) - 1)]
-            mg_str = f"{''.join(blocks)} [dim]${bet_amt}[/]"
-
-            # Position
+            t_val = self._fmt_timer(ms.get("seconds_till_end", 900))
+            up, dn = ms.get("up_ask", 0), ms.get("down_ask", 0)
+            bias = f"[green]▲[/]" if up > dn else f"[red]▼[/]" if up < dn else "·"
+            blocks = "".join(["[red]●[/]" if i < st else "[bold yellow]◉[/]" if i == st else "[dim]○[/]" for i in range(len(BET_SEQUENCE))])
+            
             if pen:
-                d = pen["direction"]
-                arrow = "⬆" if d == "YES" else "⬇"
-                clr = "green" if d == "YES" else "red"
-                pos_str = f"[bold {clr}]{arrow} ${pen['amount']:.0f}[/] [dim]@ {pen['price']:.3f}[/]"
+                p_c = "green" if pen["direction"]=="YES" else "red"
+                pos = f"[bold {p_c}]{'UP' if pen['direction']=='YES' else 'DN'} ${pen['amount']:.0f}[/] @{pen['price']:.3f}"
             else:
-                pos_str = "[dim]· idle[/]"
+                pos = "[dim]· idle[/]"
 
-            table.add_row(coin, timer_str, up_str, dn_str, fav_str, mg_str, pos_str)
+            m_table.add_row(c, t_val, f"{up:.3f}", f"{dn:.3f}", bias, blocks, pos)
+        markets = Panel(m_table, title="[bold white]MARKETS[/]", border_style="grey37")
 
-        layout["main"].update(Panel(table, title="[bold white]MARKETS[/]", border_style="grey37", padding=(0, 0)))
+        # 3. FOOTER
+        f_grid = Table.grid(expand=True)
+        f_grid.add_column(ratio=3)
+        f_grid.add_column(ratio=2)
 
-        # ── 3. Bottom: Trades + Logs ──────────────────────────────────────
-        bottom_layout = Layout()
-        bottom_layout.split_row(
-            Layout(name="trades", ratio=3),
-            Layout(name="logs", ratio=2)
-        )
-
-        # Recent Trades
-        trades_text = Text()
-        if trade_log:
-            for t in list(reversed(trade_log))[:5]:
-                pnl = t.get("pnl", 0)
+        tr_text = Text()
+        if not trade_log:
+            tr_text.append(" Waiting for trades...", style="dim")
+        else:
+            for t in list(reversed(trade_log))[:6]:
                 won = t.get("won", False)
                 clr = "green" if won else "red"
-                sign = "+" if pnl >= 0 else ""
-                d_lbl = "UP" if t["direction"] == "YES" else "DN"
-                icon = "✓" if won else "✗"
-                trades_text.append(f" {icon} ", style=f"bold {clr}")
-                trades_text.append(f"{t['coin']:>3} ", style="bold")
-                trades_text.append(f"{d_lbl:<3} ", style="dim")
-                trades_text.append(f"${t.get('amount',0):<5.0f} ", style="dim")
-                trades_text.append(f"{sign}${pnl:.2f}\n", style=f"bold {clr}")
-        else:
-            trades_text.append(" Waiting for trades...", style="dim italic")
-
-        bottom_layout["trades"].update(
-            Panel(trades_text, title="[bold]TRADES[/]", border_style="grey37", padding=(0, 1))
-        )
-
-        # System Log
-        sys_text = Text()
+                sign = "+" if t.get("pnl", 0) >= 0 else ""
+                tr_text.append(Text.from_markup(f" {'✓' if won else '✗'} [bold]{t['coin']}[/] {'UP' if t['direction']=='YES' else 'DN'} ${t['amount']:.0f} [bold {clr}]{sign}${t['pnl']:.2f}[/]\n"))
+        
+        lg_text = Text()
         with self._lock:
             for line in self._log_buffer:
-                sys_text.append_text(Text.from_markup(f" {line}\n"))
-
-        bottom_layout["logs"].update(
-            Panel(sys_text, title="[bold]LOG[/]", border_style="grey37", padding=(0, 1))
+                lg_text.append(Text.from_markup(f" {line}\n"))
+        
+        f_grid.add_row(
+            Panel(tr_text, title="[bold]TRADES[/]", border_style="grey37", expand=True, height=10),
+            Panel(lg_text, title="[bold]LOGS[/]", border_style="grey37", expand=True, height=10)
         )
 
-        layout["bottom"].update(bottom_layout)
-        return layout
+        # 4. Final Assemblage & Push to Live update
+        self._current_renderable = Group(header, markets, f_grid)
+        if self._live:
+            self._live.update(self._current_renderable)
 
     @staticmethod
     def _fmt_time(secs: float) -> str:
         s = int(secs)
-        if s >= 3600:
-            return f"{s // 3600}h{(s % 3600) // 60:02d}m"
         return f"{s // 60}m{s % 60:02d}s"
 
     @staticmethod
     def _fmt_timer(secs: int) -> str:
-        """MM:SS countdown format."""
         m, s = divmod(max(0, secs), 60)
         return f"{m:02d}:{s:02d}"

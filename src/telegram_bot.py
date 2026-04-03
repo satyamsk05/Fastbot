@@ -180,7 +180,7 @@ class TelegramBot:
             st = states.get(coin, {})
             up = st.get("up_ask", 0.0)
             dn = st.get("down_ask", 0.0)
-            rem_sec = st.get("seconds_till_end", 300)
+            rem_sec = st.get("seconds_till_end", 900)
             
             lines.append(f"🌟 *{coin}*")
             lines.append(f"  🟢 *YES:* *${up:.2f}*  |  🔴 *NO:* *${dn:.2f}*")

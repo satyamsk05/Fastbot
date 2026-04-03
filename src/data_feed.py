@@ -50,8 +50,8 @@ class DataFeed:
                 'up_asks_full': [],  # Top 1 ask level
                 'down_asks_full': [],  # Top 1 ask level
                 'tokens': {},
-                'seconds_till_end': 300,
-                'market_end_time': int(time.time()) + 300,
+                'seconds_till_end': 900,
+                'market_end_time': int(time.time()) + 900,
                 'market_start_price': 0.0,
                 'last_msg_time': time.time()  # ✅ Added
             },
@@ -70,8 +70,8 @@ class DataFeed:
                 'up_asks_full': [],
                 'down_asks_full': [],
                 'tokens': {},
-                'seconds_till_end': 300,
-                'market_end_time': int(time.time()) + 300,
+                'seconds_till_end': 900,
+                'market_end_time': int(time.time()) + 900,
                 'market_start_price': 0.0,
                 'last_msg_time': time.time()  # ✅ Added
             },
@@ -90,8 +90,8 @@ class DataFeed:
                 'up_asks_full': [],
                 'down_asks_full': [],
                 'tokens': {},
-                'seconds_till_end': 300,
-                'market_end_time': int(time.time()) + 300,
+                'seconds_till_end': 900,
+                'market_end_time': int(time.time()) + 900,
                 'market_start_price': 0.0, # Not used for SOL (no price feed)
                 'last_msg_time': time.time()  # ✅ Added: Track WebSocket health
             },
@@ -110,8 +110,8 @@ class DataFeed:
                 'up_asks_full': [],
                 'down_asks_full': [],
                 'tokens': {},
-                'seconds_till_end': 300,
-                'market_end_time': int(time.time()) + 300,
+                'seconds_till_end': 900,
+                'market_end_time': int(time.time()) + 900,
                 'market_start_price': 0.0,
                 'last_msg_time': time.time()  # Track WebSocket health
             }
@@ -212,8 +212,8 @@ class DataFeed:
     
     def _current_slug(self, coin: str) -> str:
         """Calculate current market slug for specified coin"""
-        current_slot = int(time.time()) // 300 * 300
-        return f"{coin}-updown-5m-{current_slot}"
+        current_slot = int(time.time()) // 900 * 900
+        return f"{coin}-updown-15m-{current_slot}"
     
     def _fetch_tokens(self, coin: str) -> Optional[Dict]:
         """Fetch current market tokens from Polymarket for specified coin"""
@@ -230,7 +230,7 @@ class DataFeed:
             if not events:
                 # Market not found - may not be open yet
                 current_time = int(time.time())
-                next_market = ((current_time // 300) + 1) * 300
+                next_market = ((current_time // 900) + 1) * 900
                 wait_time = next_market - current_time
                 logger.info(f"[PM-{coin.upper()}] Market {slug} not found (may not be open yet, next in {wait_time}s)")
                 return None
@@ -287,7 +287,7 @@ class DataFeed:
             
             # Calculate reconnect time
             current_time = int(time.time())
-            market_end = ((current_time // 300) * 300) + 300
+            market_end = ((current_time // 900) * 900) + 900
             reconnect_in = market_end - current_time + 2
             
             # Get market slug
