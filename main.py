@@ -36,6 +36,7 @@ from strategy      import StreakReversalStrategy, Martingale, BET_SEQUENCE
 from data_feed     import DataFeed
 from dashboard     import Dashboard
 from telegram_bot  import get_bot, get_notifier
+from safety_guard   import SafetyGuard
 import history_manager as hm
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -108,8 +109,9 @@ def _vbal_read() -> float:
     return VBAL_START
 
 def _vbal_write(b: float):
-    with open(_VBAL,"w") as f:
-        json.dump({"balance": round(b,2)}, f)
+    with _blk_bal:
+        with open(_VBAL,"w") as f:
+            json.dump({"balance": round(b,2)}, f)
 
 def get_wallet_balance() -> float:
     """Returns the cached balance immediately to avoid UI freezes."""
@@ -202,7 +204,8 @@ def get_in_bets() -> float:
 # MARKET DATA
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tokens(coin: str, ts: int) -> Optional[Dict]:
-    slug = f"{coin.lower()}-updown-5m-{ts}"
+    # ── FIXED: Use 15m slug to match INTERVAL_SEC ──
+    slug = f"{coin.lower()}-updown-15m-{ts}"
     url  = f"https://gamma-api.polymarket.com/events?slug={slug}"
     try:
         r = requests.get(url, timeout=10)
@@ -233,9 +236,27 @@ def _price(token_id: str) -> Optional[float]:
         pass
     return None
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ORDER PLACEMENT
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Persistent Global Client (Hardened) ──
+_clob_client = None
+_clob_lock   = threading.Lock()
+
+def get_clob_client():
+    global _clob_client
+    with _clob_lock:
+        if _clob_client is not None:
+            return _clob_client
+            
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+        from py_clob_client.constants import POLYGON
+        
+        creds = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
+        pk = PRIVATE_KEY.lstrip("0x") if PRIVATE_KEY else ""
+        _clob_client = ClobClient(CLOB_HOST, chain_id=POLYGON, key=pk, creds=creds,
+                                  signature_type=2 if FUNDER_ADDRESS else 1,
+                                  funder=FUNDER_ADDRESS or None)
+        return _clob_client
+
 def _place(token_id: str, amount: float, coin: str,
            step: int, direction: str, price: Optional[float] = None):
     """Returns (success, price, order_type_label)"""
@@ -250,21 +271,29 @@ def _place(token_id: str, amount: float, coin: str,
         return True, price, ot_lbl
 
     try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
-        from py_clob_client.constants import POLYGON
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        client = get_clob_client()
+        
+        # ── SAFETY CHECK ──
+        if _safety:
+            slug = _tokens(coin, (int(time.time())//INTERVAL_SEC)*INTERVAL_SEC).get("slug")
+            size = round(amount / price, 2)
+            ok, reason = _safety.check_order_allowed("BUY", size, price, slug)
+            if not ok:
+                logging.error(f"[{coin}] Safety Block: {reason}")
+                return False, price, ot_lbl
 
-        creds  = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
-        pk     = PRIVATE_KEY.lstrip("0x") if PRIVATE_KEY else ""
-        client = ClobClient(CLOB_HOST, chain_id=POLYGON, key=pk, creds=creds,
-                            signature_type=2 if FUNDER_ADDRESS else 1,
-                            funder=FUNDER_ADDRESS or None)
         size   = round(amount / price, 2)
         if size < 0.1:
             return False, price, ot_lbl
         signed = client.create_order(OrderArgs(token_id=token_id, price=price, size=size, side="BUY"))
         resp   = client.post_order(signed, OrderType.FOK if step==0 else OrderType.GTC)
-        return bool(resp and resp.get("status") not in ("unmatched",None)), price, ot_lbl
+        
+        success = bool(resp and resp.get("status") not in ("unmatched",None))
+        if success and _safety:
+            _safety.record_order("BUY", size, price, slug, resp.get("orderID"))
+            
+        return success, price, ot_lbl
     except Exception as e:
         logging.error(f"[{coin}] place: {e}")
         return False, price, ot_lbl
@@ -286,10 +315,7 @@ def _redeem_all():
         from py_clob_client.constants import POLYGON
 
         creds  = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
-        pk     = PRIVATE_KEY.lstrip("0x") if PRIVATE_KEY else ""
-        client = ClobClient(CLOB_HOST, chain_id=POLYGON, key=pk, creds=creds,
-                            signature_type=2 if FUNDER_ADDRESS else 1,
-                            funder=FUNDER_ADDRESS or None)
+        client = get_clob_client()
 
         # 1. Fetch unredeemed positions from Polymarket Data API
         url = f"https://data-api.polymarket.com/positions?user={WALLET_ADDRESS}&redeemable=true"
@@ -332,7 +358,7 @@ class CoinProc:
     def __init__(self, coin: str):
         self.coin = coin.upper()
         self.processed_ts = 0
-        self.warmup = 0
+        self.warmup = hm.get_warmup_state().get(self.coin, 0)
         self.log = get_coin_logger(coin)
 
     def tick(self, now: int) -> Optional[Dict]:
@@ -347,6 +373,11 @@ class CoinProc:
 
         self.processed_ts = boundary
         self.warmup += 1
+        # ── Persist warmup state ──
+        ws = hm.get_warmup_state()
+        ws[coin] = self.warmup
+        hm.save_warmup_state(ws)
+        
         self.log.info(f"Boundary {boundary}")
 
         # 1. Resolve ANY pending bet (not just exact ts match)
@@ -431,8 +462,8 @@ class CoinProc:
                 _strat.on_result(coin, won)
                 hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
                 hm.close_position(coin)
-                hm.record_pnl(pnl)
-                hm.record_fee(fee)
+                hm.record_pnl(pnl, is_dry_run=DRY_RUN)
+                hm.record_fee(fee, is_dry_run=DRY_RUN)
                 get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
                 
                 with _tlock:
@@ -459,13 +490,13 @@ class CoinProc:
         _strat.on_result(coin, won)
         hm.log_bet_result(coin, closed_ts, won, pnl, fee=fee)
         hm.close_position(coin)
-        hm.record_pnl(pnl)
-        hm.record_fee(fee)
+        hm.record_pnl(pnl, is_dry_run=DRY_RUN)
+        hm.record_fee(fee, is_dry_run=DRY_RUN)
 
         if DRY_RUN and won:
             _vbal_write(_vbal_read() + payout)
 
-        # get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
+        get_notifier().notify_result(coin, direction, amount, won, payout, _mg.get_step(coin))
 
         with _tlock:
             _tradelog.append({"coin":coin, "direction":direction,
@@ -485,9 +516,14 @@ def _pick_and_place(signals: List[Dict], notifier, data_feed):
     if not signals:
         return
 
-    # Recovery coins (step>0) have priority
-    recovery = [s for s in signals if s["step"] > 0]
-    chosen   = random.choice(recovery) if recovery else random.choice(signals)
+    # ── FIXED: Recovery priority (Highest Step first) ──
+    if signals:
+        recovery = [s for s in signals if s["step"] > 0]
+        if recovery:
+            # Sort by step descending, pick highest
+            chosen = sorted(recovery, key=lambda x: x["step"], reverse=True)[0]
+        else:
+            chosen = random.choice(signals)
 
     coin      = chosen["coin"]
     direction = chosen["direction"]
@@ -577,6 +613,24 @@ def main():
     if not ACTIVE_COINS:
         print("[ERROR] No coins enabled")
         sys.exit(1)
+
+    # Global Safety Guard
+    global _safety
+    try:
+        with open("config/default.json") as f:
+            cfg = json.load(f)
+        # Ensure 'safety' section exists if missing in file
+        if "safety" not in cfg:
+            cfg["safety"] = {
+                "dry_run": DRY_RUN,
+                "max_order_size_usd": 100.0,
+                "max_total_investment": 500.0,
+                "max_orders_per_minute": 10
+            }
+        _safety = SafetyGuard(cfg)
+    except Exception as e:
+        print(f"[WARNING] SafetyGuard not initialized: {e}")
+        _safety = None
 
     # Reset session state
     hm.reset_on_startup()
@@ -802,14 +856,16 @@ def main():
                         s = f.result()
                         if s: sigs.append(s)
                     except Exception as e:
-                        logger.error(f"[{coin}] Parallel tick error: {e}")
-                
+                        logger.error(f"[TICK] {coin} error: {e}")
+
+                # ── Per-tick maintenance ──
                 if sigs:
                     try:
                         _pick_and_place(sigs, notifier, data_feed)
                     except Exception as e:
                         logger.error(f"[PICK] {e}")
 
+                _strat.candles.flush() # Lazy flush candles to disk
                 time.sleep(1)
 
 

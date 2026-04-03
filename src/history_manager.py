@@ -22,6 +22,7 @@ BET_FILE     = os.path.join(HISTORY_DIR, "bet_history.json")
 CANDLE_FILE  = os.path.join(HISTORY_DIR, "candle_history.json")
 POSITION_FILE= os.path.join(HISTORY_DIR, "open_positions.json")
 DAILY_PNL_FILE = os.path.join(HISTORY_DIR, "daily_pnl.json")
+WARMUP_FILE    = os.path.join(HISTORY_DIR, "warmup.json")
 
 MAX_CANDLE_DAYS = 7          # 7-day candle retention
 CANDLES_PER_DAY = 288         # 5-min candles per day (24h * 12)
@@ -63,7 +64,8 @@ def reset_on_startup():
     with _lock:
         _write(POSITION_FILE, {})
         _write(CANDLE_FILE,   {})
-    logger.info("[HISTORY] Position and Candle history reset on startup (Bets preserved).")
+        # WARMUP_FILE is kept to allow instant resumes
+    logger.info("[HISTORY] Position and Candle history reset on startup (Warmup & Bets preserved).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -111,11 +113,13 @@ def log_bet_result(coin: str, market_ts: int, won: bool, pnl: float, fee: float 
                 break
         _write(BET_FILE, data)
 
-
-def get_bet_history() -> List[Dict]:
+def get_bet_history(n: Optional[int] = None) -> List[Dict]:
+    """Returns history, optionally truncated to the last n items."""
     with _lock:
         data = _read(BET_FILE)
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        return data[-n:] if n is not None else data
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -152,13 +156,6 @@ def get_candle_history(coin: str, n: int = MAX_CANDLES) -> List[Dict]:
             return []
         return data.get(coin.upper(), [])[-n:]
 
-def get_bet_history(n: int = 10) -> List[Dict]:
-    """Returns the last n bets."""
-    with _lock:
-        data = _read(BET_FILE)
-        if not isinstance(data, list):
-            return []
-        return data[-n:]
 
 
 def get_candle_closes(coin: str, n: int = 5) -> List[float]:
@@ -214,6 +211,16 @@ def get_open_positions() -> Dict:
     with _lock:
         data = _read(POSITION_FILE)
         return data if isinstance(data, dict) else {}
+
+
+def get_warmup_state() -> Dict[str, int]:
+    with _lock:
+        data = _read(WARMUP_FILE)
+        return data if isinstance(data, dict) else {}
+
+def save_warmup_state(states: Dict[str, int]):
+    with _lock:
+        _write(WARMUP_FILE, states)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

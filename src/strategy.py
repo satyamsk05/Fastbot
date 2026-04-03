@@ -28,6 +28,14 @@ class Martingale:
     # ── locking helpers ──────────────────────────────────────────────────────
     def _lock(self):
         lock_file = self.state_file + ".lock"
+        
+        # ── Cleanup stale lock if older than 10s ──
+        if os.path.exists(lock_file):
+            try:
+                if time.time() - os.path.getmtime(lock_file) > 10:
+                    os.remove(lock_file)
+            except Exception: pass
+
         for _ in range(50):
             try:
                 fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
@@ -130,6 +138,7 @@ class CandleStore:
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._data: Dict[str, List[Dict]] = self._load()
+        self._dirty = False
 
     def _load(self) -> Dict:
         if os.path.exists(self.path):
@@ -140,9 +149,20 @@ class CandleStore:
                 pass
         return {}
 
+    def flush(self):
+        """Force flush to disk if there are unwritten changes."""
+        if not self._dirty:
+            return
+        try:
+            with open(self.path, "w") as f:
+                json.dump(self._data, f)
+            self._dirty = False
+        except Exception as e:
+            logger.error(f"[CANDLE] Flush error: {e}")
+
     def _flush(self):
-        with open(self.path, "w") as f:
-            json.dump(self._data, f)
+        """Internal deprecated, use flush() for debounced disk I/O."""
+        self._dirty = True
 
     def push(self, coin: str, ts: int, close_price: float):
         """Append a candle close. Keeps last 20 per coin."""
