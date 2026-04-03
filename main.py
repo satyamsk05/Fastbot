@@ -85,6 +85,7 @@ _mg      = _strat.martingale
 
 _pending: Dict[str, Optional[Dict]] = {c: None for c in ACTIVE_COINS}
 _plock   = threading.Lock()
+_safety  = None  # Initialized in main()
 
 _tradelog: List[Dict] = []
 _tlock    = threading.Lock()
