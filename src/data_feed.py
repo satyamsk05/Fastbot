@@ -564,10 +564,10 @@ class DataFeed:
                         msg = f"Data stall on {coin.upper()}! (No msg for {int(now-last_msg)}s). Reconnecting..."
                         logger.info(f"[WATCHDOG] 🚨 {msg}")
                         
-                        # Notify user via Telegram
-                        try:
-                            get_notifier().notify_error(f"{coin.upper()} Stall", msg)
-                        except: pass
+                        # Notify user via Telegram (DISABLED to reduce noise as requested)
+                        # try:
+                        #     get_notifier().notify_error(f"{coin.upper()} Stall", msg)
+                        # except: pass
                         
                         # Reset timestamp to avoid double-triggers
                         self.markets[coin]['last_msg_time'] = now
